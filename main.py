@@ -10,10 +10,34 @@ import urllib3
 # 禁用SSL警告
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+# 检查必需的库
+def check_dependencies():
+    """检查并提示安装必需的依赖"""
+    missing = []
+    try:
+        import brotli
+    except ImportError:
+        try:
+            import brotlicffi
+        except ImportError:
+            missing.append("brotli")
+    
+    if missing:
+        print("⚠️  检测到缺少必需的依赖库:")
+        for lib in missing:
+            print(f"   - {lib}")
+        print("\n请运行以下命令安装:")
+        print("   pip install brotli")
+        print("\n或者安装所有依赖:")
+        print("   pip install -r requirements.txt")
+        print("")
+        return False
+    return True
+
 # 域名配置
 # 支持GitHub环境变量 IKUUU_DOMAIN，可以设置不同的域名
 # 本地测试时可直接修改 LOCAL_DOMAIN，为空时使用环境变量，默认为 ikuuu.ch
-LOCAL_DOMAIN = ""                     # 本地测试时可填入域名，如：ikuuu.ch
+LOCAL_DOMAIN = "ikuuu.org"                     # 本地测试时可填入域名，如：ikuuu.ch
 DEFAULT_DOMAIN = "ikuuu.ch"           # 默认域名
 
 # 按优先级获取域名：本地变量 > 环境变量 > 默认值
@@ -21,8 +45,8 @@ BASE_DOMAIN = LOCAL_DOMAIN if LOCAL_DOMAIN else os.getenv('IKUUU_DOMAIN', DEFAUL
 BASE_URL = f"https://{BASE_DOMAIN}"
 
 # 本地测试变量，本地测试时可以在这里设置，为空时使用环境变量
-LOCAL_EMAIL = ""     # 本地测试时填入邮箱
-LOCAL_PASSWORD = ""  # 本地测试时可以填入密码
+LOCAL_EMAIL = "1724747604@qq.com"     # 本地测试时填入邮箱
+LOCAL_PASSWORD = "Lzq030152"  # 本地测试时可以填入密码
 
 def print_with_time(message, level="INFO"):
     """带时间戳和级别的打印"""
@@ -50,6 +74,94 @@ def decode_base64_safe(encoded_str):
     except Exception as e:
         print_with_time(f"Base64解码失败: {str(e)}", "ERROR")
         return None
+
+def parse_json_response(response, context="响应"):
+    """安全地解析JSON响应，处理BOM、Brotli/gzip压缩和特殊字符"""
+    import json
+    import gzip
+    import re
+    
+    try:
+        # 先尝试直接解析
+        return response.json()
+    except Exception as e:
+        # JSON解析失败，尝试清理响应内容后再解析
+        print_with_time(f"{context}JSON解析失败，尝试清理: {str(e)}", "DEBUG")
+        
+        try:
+            # 获取原始内容
+            content = response.content
+            
+            # 检查Content-Encoding
+            encoding = response.headers.get('Content-Encoding', '')
+            if encoding:
+                print_with_time(f"{context}Content-Encoding: {encoding}", "DEBUG")
+            
+            # 处理Brotli压缩
+            if encoding == 'br' or content[:2] == b'\xce\xb2' or content[:2] == b'\x1b\x4a':
+                print_with_time(f"{context}检测到Brotli压缩，正在解压...", "DEBUG")
+                try:
+                    import brotli
+                    text = brotli.decompress(content).decode('utf-8')
+                    print_with_time(f"{context}Brotli解压成功", "DEBUG")
+                except ImportError:
+                    print_with_time(f"{context}警告：未安装brotli库，无法解压", "WARNING")
+                    print_with_time("请运行: pip install brotli", "WARNING")
+                    # 尝试使用response.text作为备选
+                    text = response.text
+                except Exception as br_err:
+                    print_with_time(f"{context}Brotli解压失败: {str(br_err)}", "DEBUG")
+                    text = response.text
+            # 处理gzip压缩
+            elif content[:2] == b'\x1f\x8b':  # gzip magic number
+                print_with_time(f"{context}检测到gzip压缩，正在解压...", "DEBUG")
+                try:
+                    text = gzip.decompress(content).decode('utf-8')
+                    print_with_time(f"{context}gzip解压成功", "DEBUG")
+                except Exception as gzip_err:
+                    print_with_time(f"{context}gzip解压失败: {str(gzip_err)}", "DEBUG")
+                    text = response.text
+            else:
+                text = response.text
+            
+            # 移除BOM（Byte Order Mark）
+            if text.startswith('\ufeff'):
+                text = text[1:]
+            
+            # 移除开头的不可见字符（使用正则找到第一个{）
+            match = re.search(r'\{', text)
+            if match:
+                text = text[match.start():]
+            else:
+                # 没找到{，直接strip
+                text = text.strip()
+            
+            # 找到第一个完整的JSON对象
+            # 使用简单的花括号计数来找到JSON结束位置
+            brace_count = 0
+            json_end = -1
+            for i, char in enumerate(text):
+                if char == '{':
+                    brace_count += 1
+                elif char == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        json_end = i + 1
+                        break
+            
+            if json_end > 0:
+                text = text[:json_end]
+            
+            print_with_time(f"清理后的{context}: {text}", "DEBUG")
+            result = json.loads(text)
+            return result
+            
+        except Exception as e2:
+            print_with_time(f"清理后仍无法解析{context}: {str(e2)}", "DEBUG")
+            # 显示原始内容的hex前20字节
+            hex_preview = content[:20].hex() if len(content) > 0 else "empty"
+            print_with_time(f"{context}内容hex前20字节: {hex_preview}", "DEBUG")
+            raise
 
 def create_session():
     """创建配置完整的会话对象"""
@@ -138,15 +250,22 @@ def login_and_get_cookie():
     print_with_time(f"使用{config_source}配置，账号: {masked_email}", "INFO")
     print_with_time(f"使用{domain_source}域名: {BASE_DOMAIN}", "INFO")
     
+    # 创建持久session来保持Cookie
+    session = create_session()
+    
     try:
         # 获取登录页面
         print_with_time("正在获取登录页面...", "INFO")
         login_page_url = f"{BASE_URL}/auth/login"
         
-        response = safe_request('GET', login_page_url)
+        try:
+            response = session.get(login_page_url, timeout=8, verify=False)
+        except Exception as e:
+            print_with_time(f"获取登录页面失败: {str(e)}", "ERROR")
+            return None
         
-        if not response or response.status_code != 200:
-            print_with_time(f"无法访问登录页面，状态码: {response.status_code if response else 'None'}", "ERROR")
+        if response.status_code != 200:
+            print_with_time(f"无法访问登录页面，状态码: {response.status_code}", "ERROR")
             return None
             
         soup = BeautifulSoup(response.text, 'html.parser')
@@ -177,35 +296,55 @@ def login_and_get_cookie():
             'Content-Type': 'application/x-www-form-urlencoded'
         }
         
-        response = safe_request('POST', login_url, data=login_data, headers=headers)
-        
-        if not response:
-            print_with_time("登录请求失败", "ERROR")
+        try:
+            response = session.post(login_url, data=login_data, headers=headers, timeout=8, verify=False, allow_redirects=False)
+        except Exception as e:
+            print_with_time(f"登录请求失败: {str(e)}", "ERROR")
             return None
         
+        print_with_time(f"登录响应状态码: {response.status_code}", "DEBUG")
+        print_with_time(f"登录响应URL: {response.url}", "DEBUG")
+        print_with_time(f"登录响应Content-Type: {response.headers.get('Content-Type', 'unknown')}", "DEBUG")
+        
+        # 获取所有Cookie（包括session中的）
+        all_cookies = session.cookies
+        cookie_string = '; '.join([f"{cookie.name}={cookie.value}" for cookie in all_cookies])
+        print_with_time(f"获取到的Cookie数量: {len(all_cookies)}", "DEBUG")
+        if len(all_cookies) > 0:
+            cookie_names = [cookie.name for cookie in all_cookies]
+            print_with_time(f"Cookie名称: {', '.join(cookie_names)}", "DEBUG")
+        
         # 检查登录结果
-        if response.status_code == 200:
+        if response.status_code in [200, 302]:
+            # 检查重定向
+            if response.status_code == 302:
+                redirect_url = response.headers.get('Location', '')
+                print_with_time(f"检测到重定向: {redirect_url}", "DEBUG")
+                if '/user' in redirect_url:
+                    print_with_time("登录成功（通过重定向检测）", "SUCCESS")
+                    return cookie_string if cookie_string else None
+            
+            # 尝试解析JSON响应
             try:
-                result = response.json()
+                result = parse_json_response(response, "登录")
+                print_with_time(f"登录响应JSON: {result}", "DEBUG")
                 if result.get('ret') == 1:
                     print_with_time("登录成功！", "SUCCESS")
-                    # 从响应头获取Cookie
-                    cookies = response.cookies
-                    cookie_string = '; '.join([f"{cookie.name}={cookie.value}" for cookie in cookies])
-                    return cookie_string
+                    return cookie_string if cookie_string else None
                 else:
                     error_msg = result.get('msg', '未知错误')
                     print_with_time(f"登录失败: {error_msg}", "ERROR")
                     return None
-            except:
-                # 可能是重定向到用户页面
-                if 'user' in response.url:
-                    print_with_time("登录成功（通过重定向检测）", "SUCCESS")
-                    cookies = response.cookies
-                    cookie_string = '; '.join([f"{cookie.name}={cookie.value}" for cookie in cookies])
+            except Exception as e:
+                # JSON解析完全失败，使用Cookie作为判断依据
+                print_with_time(f"无法解析JSON响应: {str(e)}", "DEBUG")
+                
+                # 检查是否有有效的Cookie作为登录成功的标志
+                if cookie_string and len(all_cookies) > 0:
+                    print_with_time("登录成功（通过Cookie检测）", "SUCCESS")
                     return cookie_string
                 else:
-                    print_with_time("登录状态检测失败", "ERROR")
+                    print_with_time("登录状态检测失败：无有效Cookie", "ERROR")
                     return None
         else:
             print_with_time(f"登录请求失败，状态码: {response.status_code}", "ERROR")
@@ -216,7 +355,11 @@ def login_and_get_cookie():
         raise
     except Exception as e:
         print_with_time(f"登录过程中发生错误: {str(e)}", "ERROR")
+        import traceback
+        print_with_time(f"错误详情: {traceback.format_exc()}", "DEBUG")
         return None
+    finally:
+        session.close()
 
 def checkin(cookie):
     """执行签到操作"""
@@ -239,7 +382,11 @@ def checkin(cookie):
             print_with_time("签到请求失败", "ERROR")
             return False
         
-        data = response.json()
+        try:
+            data = parse_json_response(response, "签到")
+        except Exception as e:
+            print_with_time(f"无法解析签到响应: {str(e)}", "ERROR")
+            return False
         
         if data.get('ret') == 1:
             print_with_time(f"签到成功: {data.get('msg', '获得奖励')}", "SUCCESS")
@@ -419,6 +566,11 @@ def main():
     print_separator("=", 60)
     print_with_time(f"🚀 {BASE_DOMAIN.upper()} 自动签到程序启动", "INFO")
     print_separator("=", 60)
+    
+    # 检查依赖
+    if not check_dependencies():
+        print_with_time("程序终止：缺少必需的依赖库", "ERROR")
+        return False
     
     start_time = time.time()
     
