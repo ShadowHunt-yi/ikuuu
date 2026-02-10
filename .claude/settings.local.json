@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m py_compile:*)",
+      "Bash(python.exe -m py_compile:*)",
+      "Bash(cmd.exe /c \"cd /d d:\\\\code\\\\huntyi\\\\ikuuu && python -m py_compile main.py && echo OK\")",
+      "Bash(cmd.exe /c \"cd /d d:\\\\code\\\\huntyi\\\\ikuuu && python -m py_compile main.py 2>&1 && echo SYNTAX_OK || echo SYNTAX_ERROR\")",
+      "Bash(cmd /c \"python -c \"\"import ast; ast.parse\\(open\\(r''d:\\\\code\\\\huntyi\\\\ikuuu\\\\main.py'', encoding=''utf-8''\\).read\\(\\)\\); print\\(''SYNTAX_OK''\\)\"\" 2>&1\")",
+      "Bash(powershell -Command \"python -m py_compile ''d:\\\\code\\\\huntyi\\\\ikuuu\\\\main.py''; if \\($? { Write-Host ''SYNTAX_OK'' } else { Write-Host ''SYNTAX_ERROR'' }\")",
+      "Bash(powershell -Command:*)"
+    ]
+  }
+}

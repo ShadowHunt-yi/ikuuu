@@ -35,14 +35,19 @@ def check_dependencies():
     return True
 
 # 域名配置
-# 支持GitHub环境变量 IKUUU_DOMAIN，可以设置不同的域名
-# 优先级：环境变量 > 本地变量 > 默认值
 LOCAL_DOMAIN = ""                     # 本地测试时可填入域名，如：ikuuu.org
 DEFAULT_DOMAIN = "ikuuu.ch"           # 默认域名
 
-# 按优先级获取域名：环境变量 > 本地变量 > 默认值
-BASE_DOMAIN = os.getenv('IKUUU_DOMAIN') or LOCAL_DOMAIN or DEFAULT_DOMAIN
+# 初始值，会被 resolve_domain() 覆盖
+BASE_DOMAIN = DEFAULT_DOMAIN
 BASE_URL = f"https://{BASE_DOMAIN}"
+
+# 域名自动发现配置
+DOMAIN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "domain.txt")
+NAVIGATION_URLS = [
+    "https://ikuuu.ch",
+]
+DOMAIN_TEST_TIMEOUT = 5
 
 # 本地测试变量，本地测试时可以在这里设置，环境变量优先级更高
 LOCAL_EMAIL = ""     # 本地测试时填入邮箱
@@ -74,6 +79,33 @@ def decode_base64_safe(encoded_str):
     except Exception as e:
         print_with_time(f"Base64解码失败: {str(e)}", "ERROR")
         return None
+
+def read_domain_from_file():
+    """从 domain.txt 读取缓存的域名"""
+    try:
+        if os.path.exists(DOMAIN_FILE):
+            with open(DOMAIN_FILE, 'r', encoding='utf-8') as f:
+                domain = f.readline().strip()
+            if domain and '.' in domain and ' ' not in domain:
+                domain = domain.replace('https://', '').replace('http://', '').rstrip('/')
+                print_with_time(f"从缓存文件读取域名: {domain}", "DEBUG")
+                return domain
+            else:
+                print_with_time(f"缓存文件中的域名无效: '{domain}'", "WARNING")
+    except Exception as e:
+        print_with_time(f"读取域名缓存文件失败: {str(e)}", "WARNING")
+    return None
+
+def save_domain_to_file(domain):
+    """将可用域名保存到 domain.txt"""
+    try:
+        with open(DOMAIN_FILE, 'w', encoding='utf-8') as f:
+            f.write(domain.strip() + '\n')
+        print_with_time(f"已保存域名到缓存文件: {domain}", "SUCCESS")
+        return True
+    except Exception as e:
+        print_with_time(f"保存域名缓存文件失败: {str(e)}", "WARNING")
+        return False
 
 def parse_json_response(response, context="响应"):
     """安全地解析JSON响应，处理BOM、Brotli/gzip压缩和特殊字符"""
@@ -182,6 +214,133 @@ def create_session():
     
     return session
 
+def test_domain(domain):
+    """快速测试域名是否可访问且为预期站点"""
+    test_url = f"https://{domain}/auth/login"
+    try:
+        session = create_session()
+        response = session.get(test_url, timeout=DOMAIN_TEST_TIMEOUT, verify=False, allow_redirects=True)
+        session.close()
+        if response.status_code == 200:
+            text_lower = response.text.lower()
+            if 'ikuuu' in text_lower or 'login' in text_lower or 'passwd' in text_lower:
+                print_with_time(f"域名 {domain} 可用", "SUCCESS")
+                return True
+            else:
+                print_with_time(f"域名 {domain} 响应异常（非预期内容）", "WARNING")
+                return False
+        else:
+            print_with_time(f"域名 {domain} 返回状态码 {response.status_code}", "WARNING")
+            return False
+    except Exception as e:
+        print_with_time(f"域名 {domain} 不可用: {str(e)}", "DEBUG")
+        return False
+
+def discover_domains():
+    """从导航页自动发现当前可用域名列表"""
+    print_with_time("开始自动发现域名...", "INFO")
+    discovered = []
+
+    for nav_url in NAVIGATION_URLS:
+        try:
+            print_with_time(f"尝试从 {nav_url} 获取域名列表...", "DEBUG")
+            session = create_session()
+            response = session.get(nav_url, timeout=DOMAIN_TEST_TIMEOUT, verify=False, allow_redirects=True)
+            session.close()
+
+            if response.status_code != 200:
+                continue
+
+            soup = BeautifulSoup(response.text, 'html.parser')
+
+            # 策略1：从 h3 标签提取域名
+            for h3 in soup.find_all('h3'):
+                text = h3.get_text(strip=True)
+                if re.match(r'^ikuuu\.\w{2,}$', text, re.IGNORECASE):
+                    discovered.append(text.lower())
+
+            # 策略2：从 a 标签 href 提取域名
+            for a in soup.find_all('a', href=True):
+                match = re.search(r'https?://(ikuuu\.\w{2,})/?', a['href'], re.IGNORECASE)
+                if match:
+                    domain = match.group(1).lower()
+                    if domain not in discovered:
+                        discovered.append(domain)
+
+            if discovered:
+                print_with_time(f"发现 {len(discovered)} 个域名: {', '.join(discovered)}", "SUCCESS")
+                break
+
+        except Exception as e:
+            print_with_time(f"从 {nav_url} 获取域名失败: {str(e)}", "DEBUG")
+            continue
+
+    if not discovered:
+        print_with_time("自动域名发现未找到任何域名", "WARNING")
+
+    return discovered
+
+def resolve_domain():
+    """按优先级解析可用域名：缓存文件 > 环境变量 > 本地变量 > 默认值 > 自动发现"""
+    global BASE_DOMAIN, BASE_URL
+
+    print_with_time("开始域名解析...", "INFO")
+
+    # 构建候选列表
+    candidates = []
+    sources = {}
+
+    file_domain = read_domain_from_file()
+    if file_domain:
+        candidates.append(file_domain)
+        sources[file_domain] = "缓存文件"
+
+    env_domain = os.getenv('IKUUU_DOMAIN')
+    if env_domain and env_domain not in candidates:
+        candidates.append(env_domain)
+        sources[env_domain] = "环境变量"
+
+    if LOCAL_DOMAIN and LOCAL_DOMAIN not in candidates:
+        candidates.append(LOCAL_DOMAIN)
+        sources[LOCAL_DOMAIN] = "本地变量"
+
+    if DEFAULT_DOMAIN not in candidates:
+        candidates.append(DEFAULT_DOMAIN)
+        sources[DEFAULT_DOMAIN] = "默认值"
+
+    print_with_time(f"候选域名: {', '.join(candidates)}", "DEBUG")
+
+    # 逐个测试候选域名
+    for domain in candidates:
+        source = sources.get(domain, "未知")
+        print_with_time(f"测试域名 {domain} (来源: {source})...", "INFO")
+        if test_domain(domain):
+            BASE_DOMAIN = domain
+            BASE_URL = f"https://{BASE_DOMAIN}"
+            save_domain_to_file(domain)
+            print_with_time(f"使用域名: {domain} (来源: {source})", "SUCCESS")
+            return domain
+
+    # 所有候选域名不可用，尝试自动发现
+    print_with_time("所有候选域名不可用，尝试自动发现...", "WARNING")
+    discovered = discover_domains()
+
+    for domain in discovered:
+        if domain not in candidates:
+            print_with_time(f"测试发现的域名 {domain}...", "INFO")
+            if test_domain(domain):
+                BASE_DOMAIN = domain
+                BASE_URL = f"https://{BASE_DOMAIN}"
+                save_domain_to_file(domain)
+                print_with_time(f"使用自动发现的域名: {domain}", "SUCCESS")
+                return domain
+
+    # 无可用域名，使用默认值
+    print_with_time(f"所有域名均不可用，使用默认域名: {DEFAULT_DOMAIN}", "ERROR")
+    BASE_DOMAIN = DEFAULT_DOMAIN
+    BASE_URL = f"https://{BASE_DOMAIN}"
+    return DEFAULT_DOMAIN
+
 def safe_request(method, url, **kwargs):
     """安全的网络请求，包含重试和超时控制"""
     max_retries = 2
@@ -245,7 +404,7 @@ def login_and_get_cookie():
     
     # 判断使用的配置方式
     config_source = "环境变量" if os.getenv('IKUUU_EMAIL') else "本地变量"
-    domain_source = "环境变量" if os.getenv('IKUUU_DOMAIN') else ("本地变量" if LOCAL_DOMAIN else "默认值")
+    domain_source = "环境变量" if os.getenv('IKUUU_DOMAIN') and BASE_DOMAIN == os.getenv('IKUUU_DOMAIN') else ("缓存文件" if read_domain_from_file() == BASE_DOMAIN else ("本地变量" if LOCAL_DOMAIN else "自动发现/默认值"))
     masked_email = f"{email[:3]}***{email.split('@')[1]}"
     print_with_time(f"使用{config_source}配置，账号: {masked_email}", "INFO")
     print_with_time(f"使用{domain_source}域名: {BASE_DOMAIN}", "INFO")
@@ -563,23 +722,45 @@ def get_user_info(cookie):
 
 def main():
     """主程序入口"""
+    global BASE_DOMAIN, BASE_URL
+
     print_separator("=", 60)
-    print_with_time(f"🚀 {BASE_DOMAIN.upper()} 自动签到程序启动", "INFO")
+    print_with_time("🚀 自动签到程序启动", "INFO")
     print_separator("=", 60)
-    
+
     # 检查依赖
     if not check_dependencies():
         print_with_time("程序终止：缺少必需的依赖库", "ERROR")
         return False
-    
+
+    # 解析可用域名
+    resolve_domain()
+    print_with_time(f"当前使用域名: {BASE_DOMAIN}", "INFO")
+
     start_time = time.time()
-    
+
     # 登录获取 Cookie
     cookie_data = login_and_get_cookie()
-    
+
     if not cookie_data:
-        print_with_time("程序终止：无法获取有效登录状态", "ERROR")
-        return False
+        # 当前域名登录失败，尝试切换域名重试
+        print_with_time("当前域名登录失败，尝试切换域名...", "WARNING")
+        original_domain = BASE_DOMAIN
+        discovered = discover_domains()
+        for domain in discovered:
+            if domain != original_domain:
+                if test_domain(domain):
+                    BASE_DOMAIN = domain
+                    BASE_URL = f"https://{BASE_DOMAIN}"
+                    save_domain_to_file(domain)
+                    print_with_time(f"切换域名为 {domain}，重试登录...", "INFO")
+                    cookie_data = login_and_get_cookie()
+                    if cookie_data:
+                        break
+
+        if not cookie_data:
+            print_with_time("程序终止：所有域名均无法登录", "ERROR")
+            return False
     
     # 短暂延迟，避免请求过于频繁
     time.sleep(1)
