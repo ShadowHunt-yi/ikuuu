@@ -70,16 +70,6 @@ def print_separator(char="=", length=60):
     """打印分隔线"""
     print(char * length)
 
-def decode_base64_safe(encoded_str):
-    """安全地解码Base64字符串"""
-    try:
-        decoded = base64.b64decode(encoded_str).decode('utf-8')
-        print_with_time("成功解码Base64内容", "SUCCESS")
-        return decoded
-    except Exception as e:
-        print_with_time(f"Base64解码失败: {str(e)}", "ERROR")
-        return None
-
 def read_domain_from_file():
     """从 domain.txt 读取缓存的域名"""
     try:
@@ -108,92 +98,17 @@ def save_domain_to_file(domain):
         return False
 
 def parse_json_response(response, context="响应"):
-    """安全地解析JSON响应，处理BOM、Brotli/gzip压缩和特殊字符"""
+    """安全地解析JSON响应"""
     import json
-    import gzip
-    import re
-    
     try:
-        # 先尝试直接解析
         return response.json()
-    except Exception as e:
-        # JSON解析失败，尝试清理响应内容后再解析
-        print_with_time(f"{context}JSON解析失败，尝试清理: {str(e)}", "DEBUG")
-        
-        try:
-            # 获取原始内容
-            content = response.content
-            
-            # 检查Content-Encoding
-            encoding = response.headers.get('Content-Encoding', '')
-            if encoding:
-                print_with_time(f"{context}Content-Encoding: {encoding}", "DEBUG")
-            
-            # 处理Brotli压缩
-            if encoding == 'br' or content[:2] == b'\xce\xb2' or content[:2] == b'\x1b\x4a':
-                print_with_time(f"{context}检测到Brotli压缩，正在解压...", "DEBUG")
-                try:
-                    import brotli
-                    text = brotli.decompress(content).decode('utf-8')
-                    print_with_time(f"{context}Brotli解压成功", "DEBUG")
-                except ImportError:
-                    print_with_time(f"{context}警告：未安装brotli库，无法解压", "WARNING")
-                    print_with_time("请运行: pip install brotli", "WARNING")
-                    # 尝试使用response.text作为备选
-                    text = response.text
-                except Exception as br_err:
-                    print_with_time(f"{context}Brotli解压失败: {str(br_err)}", "DEBUG")
-                    text = response.text
-            # 处理gzip压缩
-            elif content[:2] == b'\x1f\x8b':  # gzip magic number
-                print_with_time(f"{context}检测到gzip压缩，正在解压...", "DEBUG")
-                try:
-                    text = gzip.decompress(content).decode('utf-8')
-                    print_with_time(f"{context}gzip解压成功", "DEBUG")
-                except Exception as gzip_err:
-                    print_with_time(f"{context}gzip解压失败: {str(gzip_err)}", "DEBUG")
-                    text = response.text
-            else:
-                text = response.text
-            
-            # 移除BOM（Byte Order Mark）
-            if text.startswith('\ufeff'):
-                text = text[1:]
-            
-            # 移除开头的不可见字符（使用正则找到第一个{）
-            match = re.search(r'\{', text)
-            if match:
-                text = text[match.start():]
-            else:
-                # 没找到{，直接strip
-                text = text.strip()
-            
-            # 找到第一个完整的JSON对象
-            # 使用简单的花括号计数来找到JSON结束位置
-            brace_count = 0
-            json_end = -1
-            for i, char in enumerate(text):
-                if char == '{':
-                    brace_count += 1
-                elif char == '}':
-                    brace_count -= 1
-                    if brace_count == 0:
-                        json_end = i + 1
-                        break
-            
-            if json_end > 0:
-                text = text[:json_end]
-            
-            print_with_time(f"清理后的{context}: {text}", "DEBUG")
-            result = json.loads(text)
-            return result
-            
-        except Exception as e2:
-            print_with_time(f"清理后仍无法解析{context}: {str(e2)}", "DEBUG")
-            # 显示原始内容的hex前20字节
-            hex_preview = content[:20].hex() if len(content) > 0 else "empty"
-            print_with_time(f"{context}内容hex前20字节: {hex_preview}", "DEBUG")
-            raise
+    except Exception:
+        # requests 已自动处理 gzip/brotli 解压，只需清理文本
+        text = response.text.lstrip('\ufeff')
+        match = re.search(r'\{.*\}', text, re.DOTALL)
+        if match:
+            return json.loads(match.group())
+        raise ValueError(f"{context}响应不含有效JSON")
 
 def create_session():
     """创建配置完整的会话对象"""
@@ -215,26 +130,60 @@ def create_session():
     return session
 
 def test_domain(domain):
-    """快速测试域名是否可访问且为预期站点"""
-    test_url = f"https://{domain}/auth/login"
+    """快速测试域名是否为可用的 ikuuu 服务（非导航页）
+
+    判断逻辑：GET 根路径，真实服务会 302 跳转到 /auth/login，导航页返回 200
+    """
+    test_url = f"https://{domain}/"
     try:
         session = create_session()
-        response = session.get(test_url, timeout=DOMAIN_TEST_TIMEOUT, verify=False, allow_redirects=True)
+        response = session.get(test_url, timeout=DOMAIN_TEST_TIMEOUT, verify=False, allow_redirects=False)
         session.close()
-        if response.status_code == 200:
-            text_lower = response.text.lower()
-            if 'ikuuu' in text_lower or 'login' in text_lower or 'passwd' in text_lower:
-                print_with_time(f"域名 {domain} 可用", "SUCCESS")
+
+        # 真实服务：根路径 302 跳转到 /auth/login
+        if response.status_code == 302:
+            location = response.headers.get('Location', '')
+            if '/auth/login' in location:
+                print_with_time(f"域名 {domain} 可用（302 -> /auth/login）", "SUCCESS")
                 return True
             else:
-                print_with_time(f"域名 {domain} 响应异常（非预期内容）", "WARNING")
+                print_with_time(f"域名 {domain} 302跳转到 {location}，非服务页面", "DEBUG")
                 return False
-        else:
-            print_with_time(f"域名 {domain} 返回状态码 {response.status_code}", "WARNING")
+
+        # 导航页：返回 200 的 HTML 页面
+        if response.status_code == 200:
+            print_with_time(f"域名 {domain} 返回200，可能是导航页", "DEBUG")
             return False
+
+        print_with_time(f"域名 {domain} 返回状态码 {response.status_code}", "WARNING")
+        return False
     except Exception as e:
         print_with_time(f"域名 {domain} 不可用: {str(e)}", "DEBUG")
         return False
+
+def _decode_obfuscated_strings(html_text):
+    """从导航页的混淆JS中解码字符串数组"""
+    # 自定义 base64 字母表（小写在前，大写在后）
+    custom = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/='
+    standard = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/='
+    table = str.maketrans(custom, standard)
+
+    decoded = []
+    # 提取编码字符串数组
+    arrays = re.findall(r"\[(?:'[^']*',?\s*){5,}\]", html_text)
+    for arr in arrays:
+        items = re.findall(r"'([^']*)'", arr)
+        for s in items:
+            try:
+                translated = s.translate(table)
+                padding = 4 - len(translated) % 4
+                if padding != 4:
+                    translated += '=' * padding
+                raw = base64.b64decode(translated)
+                decoded.append(raw.decode('utf-8', errors='ignore'))
+            except Exception:
+                pass
+    return decoded
 
 def discover_domains():
     """从导航页自动发现当前可用域名列表"""
@@ -245,15 +194,16 @@ def discover_domains():
         try:
             print_with_time(f"尝试从 {nav_url} 获取域名列表...", "DEBUG")
             session = create_session()
-            response = session.get(nav_url, timeout=DOMAIN_TEST_TIMEOUT, verify=False, allow_redirects=True)
+            response = session.get(nav_url, timeout=DOMAIN_TEST_TIMEOUT + 5, verify=False, allow_redirects=True)
             session.close()
 
             if response.status_code != 200:
                 continue
 
-            soup = BeautifulSoup(response.text, 'html.parser')
+            html_text = response.text
 
-            # 策略1：从 h3 标签提取域名
+            # 策略1：从 h3 标签提取域名（适用于非JS渲染的导航页）
+            soup = BeautifulSoup(html_text, 'html.parser')
             for h3 in soup.find_all('h3'):
                 text = h3.get_text(strip=True)
                 if re.match(r'^ikuuu\.\w{2,}$', text, re.IGNORECASE):
@@ -267,7 +217,23 @@ def discover_domains():
                     if domain not in discovered:
                         discovered.append(domain)
 
+            # 策略3：从字符串拼接模式提取（如 'ikuuu'+'.nl'）
+            for m in re.finditer(r"'ikuuu'\+'\.(\w{2,})'", html_text):
+                domain = f"ikuuu.{m.group(1).lower()}"
+                if domain not in discovered:
+                    discovered.append(domain)
+
+            # 策略4：解码混淆JS字符串数组，查找 TLD 片段（如 .fyi, .nl）
+            for s in _decode_obfuscated_strings(html_text):
+                if re.match(r'^\.\w{2,4}$', s):
+                    domain = f"ikuuu{s}".lower()
+                    if domain not in discovered:
+                        discovered.append(domain)
+
             if discovered:
+                # 过滤掉导航页自身的域名
+                nav_domain = nav_url.replace('https://', '').replace('http://', '').rstrip('/')
+                discovered = [d for d in discovered if d != nav_domain]
                 print_with_time(f"发现 {len(discovered)} 个域名: {', '.join(discovered)}", "SUCCESS")
                 break
 
@@ -280,242 +246,140 @@ def discover_domains():
 
     return discovered
 
+def _set_domain(domain):
+    """设置当前使用的域名"""
+    global BASE_DOMAIN, BASE_URL
+    BASE_DOMAIN = domain
+    BASE_URL = f"https://{BASE_DOMAIN}"
+
 def resolve_domain():
     """按优先级解析可用域名：缓存文件 > 环境变量 > 本地变量 > 默认值 > 自动发现"""
-    global BASE_DOMAIN, BASE_URL
-
     print_with_time("开始域名解析...", "INFO")
 
-    # 构建候选列表
+    # 构建候选列表（有序去重）
     candidates = []
-    sources = {}
+    for domain in [read_domain_from_file(), os.getenv('IKUUU_DOMAIN'), LOCAL_DOMAIN, DEFAULT_DOMAIN]:
+        if domain and domain not in candidates:
+            candidates.append(domain)
 
-    file_domain = read_domain_from_file()
-    if file_domain:
-        candidates.append(file_domain)
-        sources[file_domain] = "缓存文件"
-
-    env_domain = os.getenv('IKUUU_DOMAIN')
-    if env_domain and env_domain not in candidates:
-        candidates.append(env_domain)
-        sources[env_domain] = "环境变量"
-
-    if LOCAL_DOMAIN and LOCAL_DOMAIN not in candidates:
-        candidates.append(LOCAL_DOMAIN)
-        sources[LOCAL_DOMAIN] = "本地变量"
-
-    if DEFAULT_DOMAIN not in candidates:
-        candidates.append(DEFAULT_DOMAIN)
-        sources[DEFAULT_DOMAIN] = "默认值"
-
-    print_with_time(f"候选域名: {', '.join(candidates)}", "DEBUG")
-
-    # 逐个测试候选域名
+    # 逐个测试
     for domain in candidates:
-        source = sources.get(domain, "未知")
-        print_with_time(f"测试域名 {domain} (来源: {source})...", "INFO")
         if test_domain(domain):
-            BASE_DOMAIN = domain
-            BASE_URL = f"https://{BASE_DOMAIN}"
+            _set_domain(domain)
             save_domain_to_file(domain)
-            print_with_time(f"使用域名: {domain} (来源: {source})", "SUCCESS")
+            print_with_time(f"使用域名: {domain}", "SUCCESS")
             return domain
 
-    # 所有候选域名不可用，尝试自动发现
-    print_with_time("所有候选域名不可用，尝试自动发现...", "WARNING")
-    discovered = discover_domains()
+    # 候选域名均不可用，自动发现
+    print_with_time("候选域名不可用，尝试自动发现...", "WARNING")
+    for domain in discover_domains():
+        if domain not in candidates and test_domain(domain):
+            _set_domain(domain)
+            save_domain_to_file(domain)
+            print_with_time(f"使用自动发现的域名: {domain}", "SUCCESS")
+            return domain
 
-    for domain in discovered:
-        if domain not in candidates:
-            print_with_time(f"测试发现的域名 {domain}...", "INFO")
-            if test_domain(domain):
-                BASE_DOMAIN = domain
-                BASE_URL = f"https://{BASE_DOMAIN}"
-                save_domain_to_file(domain)
-                print_with_time(f"使用自动发现的域名: {domain}", "SUCCESS")
-                return domain
-
-    # 无可用域名，使用默认值
     print_with_time(f"所有域名均不可用，使用默认域名: {DEFAULT_DOMAIN}", "ERROR")
-    BASE_DOMAIN = DEFAULT_DOMAIN
-    BASE_URL = f"https://{BASE_DOMAIN}"
-    return DEFAULT_DOMAIN
+    _set_domain(DEFAULT_DOMAIN)
 
 def safe_request(method, url, **kwargs):
-    """安全的网络请求，包含重试和超时控制"""
-    max_retries = 2
-    base_timeout = 8  # 降低超时时间
-    
-    for attempt in range(max_retries):
+    """安全的网络请求，包含重试"""
+    kwargs.setdefault('timeout', 8)
+    kwargs['verify'] = False
+
+    for attempt in range(2):
         try:
             if attempt > 0:
-                wait_time = attempt * 2
-                print_with_time(f"第 {attempt + 1} 次重试，等待 {wait_time} 秒...", "WARNING")
-                time.sleep(wait_time)
-            
-            # 使用新的session
+                time.sleep(attempt * 2)
+                print_with_time(f"第 {attempt + 1} 次重试...", "WARNING")
             session = create_session()
-            
-            # 设置超时
-            kwargs['timeout'] = base_timeout
-            kwargs['verify'] = False  # 跳过SSL验证
-            
             response = session.request(method, url, **kwargs)
-            session.close()  # 主动关闭连接
+            session.close()
             return response
-            
-        except requests.exceptions.Timeout:
-            print_with_time(f"请求超时 (尝试 {attempt + 1}/{max_retries})", "WARNING")
-            if attempt == max_retries - 1:
-                print_with_time("所有重试均超时，请检查网络连接", "ERROR")
-                return None
-        except requests.exceptions.ConnectionError as e:
-            print_with_time(f"连接错误: {str(e)} (尝试 {attempt + 1}/{max_retries})", "WARNING")
-            if attempt == max_retries - 1:
-                print_with_time("网络连接失败，请检查网络状态", "ERROR")
-                return None
         except KeyboardInterrupt:
-            print_with_time("用户中断操作", "WARNING")
             raise
         except Exception as e:
-            print_with_time(f"请求异常: {str(e)} (尝试 {attempt + 1}/{max_retries})", "WARNING")
-            if attempt == max_retries - 1:
-                return None
-    
+            if attempt == 1:
+                print_with_time(f"请求失败: {str(e)}", "ERROR")
     return None
 
 def login_and_get_cookie():
     """登录 SSPanel 并获取 Cookie"""
-    # 按优先级获取账户信息：环境变量 > 本地变量
     email = os.getenv('IKUUU_EMAIL') or LOCAL_EMAIL
     password = os.getenv('IKUUU_PASSWORD') or LOCAL_PASSWORD
-    
+
     if not email or not password:
-        print_with_time("请设置账户信息", "ERROR")
-        print_with_time("可选配置方式:", "INFO")
-        print("   🔧 1. 设置环境变量 IKUUU_EMAIL 和 IKUUU_PASSWORD（推荐）")
-        print("   📝 2. 在代码中设置 LOCAL_EMAIL 和 LOCAL_PASSWORD")
-        print("")
-        print_with_time("可选域名配置:", "INFO")
-        print("   🔧 1. 设置环境变量 IKUUU_DOMAIN（推荐）")
-        print("   📝 2. 在代码中设置 LOCAL_DOMAIN")
-        print(f"   ⚙️  当前使用域名: {BASE_DOMAIN}")
+        print_with_time("请设置账户信息（环境变量 IKUUU_EMAIL/IKUUU_PASSWORD 或代码中 LOCAL_EMAIL/LOCAL_PASSWORD）", "ERROR")
         return None
-    
-    # 判断使用的配置方式
-    config_source = "环境变量" if os.getenv('IKUUU_EMAIL') else "本地变量"
-    domain_source = "环境变量" if os.getenv('IKUUU_DOMAIN') and BASE_DOMAIN == os.getenv('IKUUU_DOMAIN') else ("缓存文件" if read_domain_from_file() == BASE_DOMAIN else ("本地变量" if LOCAL_DOMAIN else "自动发现/默认值"))
+
     masked_email = f"{email[:3]}***{email.split('@')[1]}"
-    print_with_time(f"使用{config_source}配置，账号: {masked_email}", "INFO")
-    print_with_time(f"使用{domain_source}域名: {BASE_DOMAIN}", "INFO")
-    
-    # 创建持久session来保持Cookie
+    print_with_time(f"账号: {masked_email}，域名: {BASE_DOMAIN}", "INFO")
+
     session = create_session()
-    
     try:
-        # 获取登录页面
-        print_with_time("正在获取登录页面...", "INFO")
+        # 获取登录页面（取CSRF token）
         login_page_url = f"{BASE_URL}/auth/login"
-        
         try:
             response = session.get(login_page_url, timeout=8, verify=False)
         except Exception as e:
             print_with_time(f"获取登录页面失败: {str(e)}", "ERROR")
             return None
-        
+
         if response.status_code != 200:
             print_with_time(f"无法访问登录页面，状态码: {response.status_code}", "ERROR")
             return None
-            
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
+
         # 查找 CSRF token
-        csrf_token = None
+        soup = BeautifulSoup(response.text, 'html.parser')
         csrf_input = soup.find('input', {'name': '_token'})
+
+        login_data = {'email': email, 'passwd': password}
         if csrf_input:
-            csrf_token = csrf_input.get('value')
-            print_with_time("已获取CSRF令牌", "DEBUG")
-        
-        # 准备登录数据
-        login_data = {
-            'email': email,
-            'passwd': password
-        }
-        
-        if csrf_token:
-            login_data['_token'] = csrf_token
-        
+            login_data['_token'] = csrf_input.get('value')
+
         # 发送登录请求
-        print_with_time("正在发送登录请求...", "INFO")
-        login_url = f"{BASE_URL}/auth/login"
-        
+        print_with_time("正在登录...", "INFO")
         headers = {
             'Origin': BASE_URL,
-            'Referer': f"{BASE_URL}/auth/login",
+            'Referer': login_page_url,
             'Content-Type': 'application/x-www-form-urlencoded'
         }
-        
+
         try:
-            response = session.post(login_url, data=login_data, headers=headers, timeout=8, verify=False, allow_redirects=False)
+            response = session.post(login_page_url, data=login_data, headers=headers,
+                                    timeout=8, verify=False, allow_redirects=False)
         except Exception as e:
             print_with_time(f"登录请求失败: {str(e)}", "ERROR")
             return None
-        
-        print_with_time(f"登录响应状态码: {response.status_code}", "DEBUG")
-        print_with_time(f"登录响应URL: {response.url}", "DEBUG")
-        print_with_time(f"登录响应Content-Type: {response.headers.get('Content-Type', 'unknown')}", "DEBUG")
-        
-        # 获取所有Cookie（包括session中的）
-        all_cookies = session.cookies
-        cookie_string = '; '.join([f"{cookie.name}={cookie.value}" for cookie in all_cookies])
-        print_with_time(f"获取到的Cookie数量: {len(all_cookies)}", "DEBUG")
-        if len(all_cookies) > 0:
-            cookie_names = [cookie.name for cookie in all_cookies]
-            print_with_time(f"Cookie名称: {', '.join(cookie_names)}", "DEBUG")
-        
+
+        cookie_string = '; '.join([f"{c.name}={c.value}" for c in session.cookies])
+
         # 检查登录结果
-        if response.status_code in [200, 302]:
-            # 检查重定向
-            if response.status_code == 302:
-                redirect_url = response.headers.get('Location', '')
-                print_with_time(f"检测到重定向: {redirect_url}", "DEBUG")
-                if '/user' in redirect_url:
-                    print_with_time("登录成功（通过重定向检测）", "SUCCESS")
-                    return cookie_string if cookie_string else None
-            
-            # 尝试解析JSON响应
+        if response.status_code == 302 and '/user' in response.headers.get('Location', ''):
+            print_with_time("登录成功", "SUCCESS")
+            return cookie_string or None
+
+        if response.status_code == 200:
             try:
                 result = parse_json_response(response, "登录")
-                print_with_time(f"登录响应JSON: {result}", "DEBUG")
                 if result.get('ret') == 1:
-                    print_with_time("登录成功！", "SUCCESS")
-                    return cookie_string if cookie_string else None
+                    print_with_time("登录成功", "SUCCESS")
+                    return cookie_string or None
                 else:
-                    error_msg = result.get('msg', '未知错误')
-                    print_with_time(f"登录失败: {error_msg}", "ERROR")
+                    print_with_time(f"登录失败: {result.get('msg', '未知错误')}", "ERROR")
                     return None
-            except Exception as e:
-                # JSON解析完全失败，使用Cookie作为判断依据
-                print_with_time(f"无法解析JSON响应: {str(e)}", "DEBUG")
-                
-                # 检查是否有有效的Cookie作为登录成功的标志
-                if cookie_string and len(all_cookies) > 0:
-                    print_with_time("登录成功（通过Cookie检测）", "SUCCESS")
+            except Exception:
+                # JSON解析失败，用Cookie判断
+                if cookie_string:
+                    print_with_time("登录成功（Cookie检测）", "SUCCESS")
                     return cookie_string
-                else:
-                    print_with_time("登录状态检测失败：无有效Cookie", "ERROR")
-                    return None
-        else:
-            print_with_time(f"登录请求失败，状态码: {response.status_code}", "ERROR")
-            return None
-            
+
+        print_with_time(f"登录失败，状态码: {response.status_code}", "ERROR")
+        return None
     except KeyboardInterrupt:
-        print_with_time("用户中断登录操作", "WARNING")
         raise
     except Exception as e:
-        print_with_time(f"登录过程中发生错误: {str(e)}", "ERROR")
-        import traceback
-        print_with_time(f"错误详情: {traceback.format_exc()}", "DEBUG")
+        print_with_time(f"登录错误: {str(e)}", "ERROR")
         return None
     finally:
         session.close()
@@ -523,125 +387,73 @@ def login_and_get_cookie():
 def checkin(cookie):
     """执行签到操作"""
     print_with_time("开始执行签到...", "INFO")
-    
     headers = {
-        'Origin': BASE_URL,
-        'Referer': f"{BASE_URL}/user",
-        'Cookie': cookie,
-        'X-Requested-With': 'XMLHttpRequest',
+        'Origin': BASE_URL, 'Referer': f"{BASE_URL}/user",
+        'Cookie': cookie, 'X-Requested-With': 'XMLHttpRequest',
         'Content-Type': 'application/x-www-form-urlencoded'
     }
-    url = f"{BASE_URL}/user/checkin"
-    
+
     try:
-        print_with_time("正在发送签到请求...", "DEBUG")
-        response = safe_request('POST', url, headers=headers)
-        
+        response = safe_request('POST', f"{BASE_URL}/user/checkin", headers=headers)
         if not response:
             print_with_time("签到请求失败", "ERROR")
             return False
-        
-        try:
-            data = parse_json_response(response, "签到")
-        except Exception as e:
-            print_with_time(f"无法解析签到响应: {str(e)}", "ERROR")
-            return False
-        
+
+        data = parse_json_response(response, "签到")
+        msg = data.get('msg', '')
         if data.get('ret') == 1:
-            print_with_time(f"签到成功: {data.get('msg', '获得奖励')}", "SUCCESS")
+            print_with_time(f"签到成功: {msg}", "SUCCESS")
             return True
-        elif "已经签到" in data.get('msg', ''):
-            print_with_time(f"今日已签到: {data.get('msg', '请明天再来')}", "WARNING")
+        elif "已经签到" in msg:
+            print_with_time(f"今日已签到: {msg}", "WARNING")
             return True
         else:
-            print_with_time(f"签到失败: {data.get('msg', '未知错误')}", "ERROR")
+            print_with_time(f"签到失败: {msg or '未知错误'}", "ERROR")
             return False
-            
     except KeyboardInterrupt:
-        print_with_time("用户中断签到操作", "WARNING")
         raise
     except Exception as e:
-        print_with_time(f"签到请求失败: {str(e)}", "ERROR")
+        print_with_time(f"签到失败: {str(e)}", "ERROR")
         return False
 
 def extract_account_info(soup):
     """从解析的HTML中提取账户信息"""
+    # 关键词 -> 显示标签映射
+    label_map = [
+        (['会员时长', '时长', '到期'], '会员状态'),
+        (['剩余流量', '流量', '可用'], '剩余流量'),
+        (['在线设备', '设备', '连接'], '在线设备'),
+        (['钱包', '余额', '积分'], '账户余额'),
+    ]
+
+    stat_cards = (soup.find_all('div', class_='card-statistic-2')
+                  or soup.find_all('div', class_='card-statistic')
+                  or soup.find_all('div', class_='card'))
+
     info_found = False
-    
-    # 查找统计卡片
-    stat_cards = soup.find_all('div', class_='card-statistic-2')
-    if not stat_cards:
-        stat_cards = soup.find_all('div', class_='card-statistic')
-    if not stat_cards:
-        stat_cards = soup.find_all('div', class_='card')
-    
-    print_with_time(f"找到 {len(stat_cards)} 个信息卡片", "DEBUG")
-    
-    for i, card in enumerate(stat_cards, 1):
-        # 尝试找到标题
+    for card in stat_cards:
         header = card.find('h4') or card.find('h3') or card.find('h5')
-        
-        if header:
-            title = header.get_text(strip=True)
-            
-            # 获取主要数值
-            body = card.find('div', class_='card-body') or card.find('div', class_='card-content')
-            
-            if body:
-                value_text = re.sub(r'\s+', ' ', body.get_text(strip=True))
-                
-                # 根据标题分类显示信息
-                if any(keyword in title for keyword in ['会员时长', '时长', '到期']):
-                    # 清理会员状态显示
-                    clean_value = value_text.replace('天', '天').strip()
-                    print(f"👑 会员状态: {clean_value}")
-                    info_found = True
-                    
-                elif any(keyword in title for keyword in ['剩余流量', '流量', '可用']):
-                    # 清理流量显示
-                    clean_value = value_text.strip()
-                    print(f"📊 剩余流量: {clean_value}")
-                    info_found = True
-                    
-                    # 查找今日使用量并清理格式
-                    stats = card.find('div', class_='card-stats-title') or card.find('div', class_='card-stats')
-                    if stats:
-                        extra_info = re.sub(r'\s+', ' ', stats.get_text(strip=True))
-                        if any(keyword in extra_info for keyword in ['今日', '已用', 'today']):
-                            # 清理今日使用量格式，移除重复的冒号
-                            clean_extra = extra_info.replace('今日已用 :', '').replace('今日已用:', '').strip()
-                            if clean_extra:
-                                print(f"📈 今日使用: {clean_extra}")
-                                
-                elif any(keyword in title for keyword in ['在线设备', '设备', '连接']):
-                    # 清理设备数显示
-                    clean_value = value_text.strip()
-                    print(f"📱 在线设备: {clean_value}")
-                    info_found = True
-                    
-                elif any(keyword in title for keyword in ['钱包', '余额', '积分']):
-                    # 清理余额显示
-                    clean_value = value_text.strip()
-                    print(f"💰 账户余额: {clean_value}")
-                    info_found = True
-                    
-                    # 查找累计返利并清理格式
-                    stats = card.find('div', class_='card-stats-title') or card.find('div', class_='card-stats')
-                    if stats:
-                        extra_info = re.sub(r'\s+', ' ', stats.get_text(strip=True))
-                        if extra_info and extra_info != value_text:
-                            # 清理返利信息格式，移除重复的冒号和文字
-                            clean_extra = extra_info.replace('累计获得返利金额:', '').replace('累计获得返利金额', '').strip()
-                            if clean_extra and clean_extra != clean_value:
-                                print(f"💎 累计返利: {clean_extra}")
-                else:
-                    # 显示其他有效信息，清理格式
-                    if value_text and len(value_text) > 3 and not value_text.isspace():
-                        clean_title = title.replace(':', '').strip()
-                        clean_value = value_text.strip()
-                        print(f"📋 {clean_title}: {clean_value}")
-                        info_found = True
-    
+        if not header:
+            continue
+        title = header.get_text(strip=True)
+        body = card.find('div', class_='card-body') or card.find('div', class_='card-content')
+        if not body:
+            continue
+
+        value = re.sub(r'\s+', ' ', body.get_text(strip=True))
+        label = None
+        for keywords, lbl in label_map:
+            if any(k in title for k in keywords):
+                label = lbl
+                break
+
+        if label:
+            print(f"  {label}: {value}")
+            info_found = True
+        elif value and len(value) > 3:
+            print(f"  {title.rstrip(':')}: {value}")
+            info_found = True
+
     return info_found
 
 def get_user_info(cookie):
@@ -672,43 +484,28 @@ def get_user_info(cookie):
                 return False
         
         # 检查是否有Base64编码的内容
-        scripts = soup.find_all('script')
         decoded_html = None
-        
-        for script in scripts:
+        for script in soup.find_all('script'):
             script_content = script.get_text()
             if 'originBody' in script_content and 'decodeBase64' in script_content:
-                # 提取Base64编码的内容
                 match = re.search(r'var originBody = "([^"]+)"', script_content)
                 if match:
-                    encoded_content = match.group(1)
-                    decoded_html = decode_base64_safe(encoded_content)
+                    try:
+                        decoded_html = base64.b64decode(match.group(1)).decode('utf-8')
+                    except Exception:
+                        pass
                     break
-        
-        info_extracted = False
-        
-        if decoded_html:
-            # 解析解码后的HTML
-            print_with_time("正在解析解码后的页面内容...", "DEBUG")
-            decoded_soup = BeautifulSoup(decoded_html, 'html.parser')
-            info_extracted = extract_account_info(decoded_soup)
-        else:
-            # 尝试直接解析原始页面
-            print_with_time("尝试直接解析页面内容...", "DEBUG")
-            info_extracted = extract_account_info(soup)
-        
+
+        target_soup = BeautifulSoup(decoded_html, 'html.parser') if decoded_html else soup
+        info_extracted = extract_account_info(target_soup)
+
         if not info_extracted:
             print_with_time("未能提取到详细账户信息", "WARNING")
-            # 尝试查找页面中的数值信息作为备用
-            all_text = soup.get_text() if not decoded_html else decoded_html
+            all_text = decoded_html or soup.get_text()
             numbers = re.findall(r'(\d+(?:\.\d+)?)\s*(GB|MB|天|个|USD|CNY)', all_text)
             if numbers:
-                print_with_time("发现以下数值信息:", "INFO")
-                unique_numbers = list(set(numbers))[:5]  # 去重并限制数量
-                for value, unit in unique_numbers:
-                    print(f"📊 {value} {unit}")
-            else:
-                print_with_time("页面可能使用了高级反爬虫保护", "WARNING")
+                for value, unit in set(numbers):
+                    print(f"  {value} {unit}")
         
         print_separator("─", 50)
         return True
@@ -722,71 +519,45 @@ def get_user_info(cookie):
 
 def main():
     """主程序入口"""
-    global BASE_DOMAIN, BASE_URL
-
     print_separator("=", 60)
-    print_with_time("🚀 自动签到程序启动", "INFO")
+    print_with_time("自动签到程序启动", "INFO")
     print_separator("=", 60)
 
-    # 检查依赖
     if not check_dependencies():
-        print_with_time("程序终止：缺少必需的依赖库", "ERROR")
         return False
 
-    # 解析可用域名
     resolve_domain()
-    print_with_time(f"当前使用域名: {BASE_DOMAIN}", "INFO")
 
     start_time = time.time()
 
-    # 登录获取 Cookie
+    # 登录
     cookie_data = login_and_get_cookie()
+    if not cookie_data:
+        # 登录失败，尝试其他域名
+        print_with_time("登录失败，尝试切换域名...", "WARNING")
+        original = BASE_DOMAIN
+        for domain in discover_domains():
+            if domain != original and test_domain(domain):
+                _set_domain(domain)
+                save_domain_to_file(domain)
+                print_with_time(f"切换到 {domain}，重试登录...", "INFO")
+                cookie_data = login_and_get_cookie()
+                if cookie_data:
+                    break
 
     if not cookie_data:
-        # 当前域名登录失败，尝试切换域名重试
-        print_with_time("当前域名登录失败，尝试切换域名...", "WARNING")
-        original_domain = BASE_DOMAIN
-        discovered = discover_domains()
-        for domain in discovered:
-            if domain != original_domain:
-                if test_domain(domain):
-                    BASE_DOMAIN = domain
-                    BASE_URL = f"https://{BASE_DOMAIN}"
-                    save_domain_to_file(domain)
-                    print_with_time(f"切换域名为 {domain}，重试登录...", "INFO")
-                    cookie_data = login_and_get_cookie()
-                    if cookie_data:
-                        break
+        print_with_time("所有域名均无法登录", "ERROR")
+        return False
 
-        if not cookie_data:
-            print_with_time("程序终止：所有域名均无法登录", "ERROR")
-            return False
-    
-    # 短暂延迟，避免请求过于频繁
     time.sleep(1)
-    
-    # 执行签到
     checkin_result = checkin(cookie_data)
-    
-    # 短暂延迟
     time.sleep(1)
-    
-    # 获取用户信息
-    info_result = get_user_info(cookie_data)
-    
-    # 程序结束统计
-    end_time = time.time()
-    elapsed_time = round(end_time - start_time, 2)
-    
+    get_user_info(cookie_data)
+
+    elapsed = round(time.time() - start_time, 2)
     print_separator("=", 60)
-    if checkin_result and info_result:
-        print_with_time(f"✨ 程序执行完成，耗时 {elapsed_time} 秒", "SUCCESS")
-    elif checkin_result:
-        print_with_time(f"⚠️ 签到成功但信息获取异常，耗时 {elapsed_time} 秒", "WARNING")
-    else:
-        print_with_time(f"❌ 程序执行异常，耗时 {elapsed_time} 秒", "ERROR")
+    print_with_time(f"执行完成，耗时 {elapsed} 秒", "SUCCESS" if checkin_result else "ERROR")
     print_separator("=", 60)
-    
     return checkin_result
 
 if __name__ == "__main__":
