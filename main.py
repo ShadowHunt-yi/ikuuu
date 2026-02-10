@@ -36,17 +36,17 @@ def check_dependencies():
 
 # 域名配置
 # 支持GitHub环境变量 IKUUU_DOMAIN，可以设置不同的域名
-# 本地测试时可直接修改 LOCAL_DOMAIN，为空时使用环境变量，默认为 ikuuu.ch
-LOCAL_DOMAIN = "ikuuu.org"                     # 本地测试时可填入域名，如：ikuuu.ch
+# 优先级：环境变量 > 本地变量 > 默认值
+LOCAL_DOMAIN = ""                     # 本地测试时可填入域名，如：ikuuu.org
 DEFAULT_DOMAIN = "ikuuu.ch"           # 默认域名
 
-# 按优先级获取域名：本地变量 > 环境变量 > 默认值
-BASE_DOMAIN = LOCAL_DOMAIN if LOCAL_DOMAIN else os.getenv('IKUUU_DOMAIN', DEFAULT_DOMAIN)
+# 按优先级获取域名：环境变量 > 本地变量 > 默认值
+BASE_DOMAIN = os.getenv('IKUUU_DOMAIN') or LOCAL_DOMAIN or DEFAULT_DOMAIN
 BASE_URL = f"https://{BASE_DOMAIN}"
 
-# 本地测试变量，本地测试时可以在这里设置，为空时使用环境变量
+# 本地测试变量，本地测试时可以在这里设置，环境变量优先级更高
 LOCAL_EMAIL = ""     # 本地测试时填入邮箱
-LOCAL_PASSWORD = ""  # 本地测试时可以填入密码
+LOCAL_PASSWORD = ""  # 本地测试时填入密码
 
 def print_with_time(message, level="INFO"):
     """带时间戳和级别的打印"""
@@ -227,25 +227,25 @@ def safe_request(method, url, **kwargs):
 
 def login_and_get_cookie():
     """登录 SSPanel 并获取 Cookie"""
-    # 按优先级获取账户信息：本地变量 > 环境变量
-    email = LOCAL_EMAIL if LOCAL_EMAIL else os.getenv('IKUUU_EMAIL')
-    password = LOCAL_PASSWORD if LOCAL_PASSWORD else os.getenv('IKUUU_PASSWORD')
+    # 按优先级获取账户信息：环境变量 > 本地变量
+    email = os.getenv('IKUUU_EMAIL') or LOCAL_EMAIL
+    password = os.getenv('IKUUU_PASSWORD') or LOCAL_PASSWORD
     
     if not email or not password:
         print_with_time("请设置账户信息", "ERROR")
         print_with_time("可选配置方式:", "INFO")
-        print("   📝 1. 在代码中设置 LOCAL_EMAIL 和 LOCAL_PASSWORD")
-        print("   🔧 2. 设置环境变量 IKUUU_EMAIL 和 IKUUU_PASSWORD")
+        print("   🔧 1. 设置环境变量 IKUUU_EMAIL 和 IKUUU_PASSWORD（推荐）")
+        print("   📝 2. 在代码中设置 LOCAL_EMAIL 和 LOCAL_PASSWORD")
         print("")
         print_with_time("可选域名配置:", "INFO")
-        print("   📝 1. 在代码中设置 LOCAL_DOMAIN")
-        print("   🔧 2. 设置环境变量 IKUUU_DOMAIN")
+        print("   🔧 1. 设置环境变量 IKUUU_DOMAIN（推荐）")
+        print("   📝 2. 在代码中设置 LOCAL_DOMAIN")
         print(f"   ⚙️  当前使用域名: {BASE_DOMAIN}")
         return None
     
     # 判断使用的配置方式
-    config_source = "本地变量" if LOCAL_EMAIL and LOCAL_PASSWORD else "环境变量"
-    domain_source = "本地变量" if LOCAL_DOMAIN else ("环境变量" if os.getenv('IKUUU_DOMAIN') else "默认值")
+    config_source = "环境变量" if os.getenv('IKUUU_EMAIL') else "本地变量"
+    domain_source = "环境变量" if os.getenv('IKUUU_DOMAIN') else ("本地变量" if LOCAL_DOMAIN else "默认值")
     masked_email = f"{email[:3]}***{email.split('@')[1]}"
     print_with_time(f"使用{config_source}配置，账号: {masked_email}", "INFO")
     print_with_time(f"使用{domain_source}域名: {BASE_DOMAIN}", "INFO")

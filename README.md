@@ -27,17 +27,51 @@ pip install requests beautifulsoup4 brotli urllib3
 
 ## 配置说明
 
+### 配置优先级
+
+配置的优先级顺序为：**环境变量 > 本地变量 > 默认值**
+
+这意味着：
+- 🥇 环境变量（如 GitHub Secrets）优先级最高
+- 🥈 代码中的本地变量次之
+- 🥉 默认值最低
+
+这样设计的好处是：
+- ✅ 在 GitHub Actions 中运行时，使用 Secrets 配置
+- ✅ 本地开发测试时，可以在代码中临时设置
+- ✅ 本地变量不会覆盖云端的环境变量
+
 ### 本地运行配置
 
-在 `main.py` 文件中修改以下变量：
+在 `main.py` 文件中修改以下变量（仅用于本地测试）：
 
 ```python
-# 账户配置
+# 账户配置（本地测试用）
 LOCAL_EMAIL = "your_email@example.com"      # 你的邮箱
 LOCAL_PASSWORD = "your_password"             # 你的密码
 
-# 域名配置（可选）
+# 域名配置（本地测试用，可选）
 LOCAL_DOMAIN = "ikuuu.org"                   # 当前可用域名
+```
+
+⚠️ **注意**: 如果设置了环境变量，环境变量会覆盖这里的本地配置。
+
+### 使用环境变量（推荐）
+
+在系统中设置环境变量：
+
+**Windows (PowerShell)**:
+```powershell
+$env:IKUUU_EMAIL = "your_email@example.com"
+$env:IKUUU_PASSWORD = "your_password"
+$env:IKUUU_DOMAIN = "ikuuu.org"  # 可选
+```
+
+**Linux/macOS**:
+```bash
+export IKUUU_EMAIL="your_email@example.com"
+export IKUUU_PASSWORD="your_password"
+export IKUUU_DOMAIN="ikuuu.org"  # 可选
 ```
 
 ## GitHub Actions 配置
