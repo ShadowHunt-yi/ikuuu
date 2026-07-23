@@ -52,6 +52,8 @@ DOMAIN_TEST_TIMEOUT = 5
 # 本地测试变量，本地测试时可以在这里设置，环境变量优先级更高
 LOCAL_EMAIL = ""     # 本地测试时填入邮箱
 LOCAL_PASSWORD = ""  # 本地测试时填入密码
+LOCAL_CAPTCHA_API_KEY = ""  # 本地测试时填入打码平台 API Key（CapSolver / YesCaptcha）
+LOCAL_CAPTCHA_PROVIDER = ""  # 可选: capsolver / yescaptcha，留空则自动识别
 
 def print_with_time(message, level="INFO"):
     """带时间戳和级别的打印"""
@@ -303,8 +305,205 @@ def safe_request(method, url, **kwargs):
                 print_with_time(f"请求失败: {str(e)}", "ERROR")
     return None
 
+def decode_page_html(html_text):
+    """解码站点 base64 混淆页面（originBody）"""
+    if not html_text:
+        return html_text
+    match = re.search(r'var\s+originBody\s*=\s*"([^"]+)"', html_text)
+    if match:
+        try:
+            return base64.b64decode(match.group(1)).decode('utf-8', errors='replace')
+        except Exception:
+            pass
+    return html_text
+
+
+def extract_geetest_captcha_id(html_text):
+    """从登录页提取 Geetest V4 captchaId"""
+    decoded = decode_page_html(html_text)
+    patterns = [
+        r"captchaId\s*:\s*['\"]([0-9a-fA-F]{32})['\"]",
+        r"captcha_id\s*[:=]\s*['\"]([0-9a-fA-F]{32})['\"]",
+        r"initGeetest4\(\s*\{\s*captchaId\s*:\s*['\"]([0-9a-fA-F]{32})['\"]",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, decoded)
+        if match:
+            return match.group(1)
+    return None
+
+
+def get_captcha_config():
+    """读取打码配置：环境变量优先于本地变量"""
+    api_key = (
+        os.getenv('CAPSOLVER_API_KEY')
+        or os.getenv('YESCAPTCHA_API_KEY')
+        or os.getenv('CAPTCHA_API_KEY')
+        or LOCAL_CAPTCHA_API_KEY
+        or ''
+    ).strip()
+    provider = (
+        os.getenv('CAPTCHA_PROVIDER')
+        or LOCAL_CAPTCHA_PROVIDER
+        or ''
+    ).strip().lower()
+
+    if not provider:
+        if os.getenv('YESCAPTCHA_API_KEY') and not os.getenv('CAPSOLVER_API_KEY'):
+            provider = 'yescaptcha'
+        elif api_key:
+            provider = 'capsolver'
+    if provider in ('yes', 'yc', 'yescaptcha.com'):
+        provider = 'yescaptcha'
+    if provider in ('cap', 'capsolver.com'):
+        provider = 'capsolver'
+    return api_key, provider
+
+
+def _poll_task_result(session, result_url, payload, provider_name, max_wait=120):
+    """轮询打码任务结果"""
+    start = time.time()
+    while time.time() - start < max_wait:
+        time.sleep(3)
+        try:
+            resp = session.post(result_url, json=payload, timeout=30, verify=False)
+            data = resp.json()
+        except Exception as e:
+            print_with_time(f"{provider_name} 查询结果失败: {e}", "WARNING")
+            continue
+
+        status = str(data.get('status', '')).lower()
+        error_id = data.get('errorId', 0)
+        if error_id not in (0, '0', None, ''):
+            msg = data.get('errorDescription') or data.get('errorCode') or str(data)
+            raise RuntimeError(f"{provider_name} 打码失败: {msg}")
+
+        if status in ('ready', 'success'):
+            solution = data.get('solution') or {}
+            # 兼容不同字段命名
+            result = {
+                'lot_number': solution.get('lot_number') or solution.get('lotNumber'),
+                'captcha_output': solution.get('captcha_output') or solution.get('captchaOutput'),
+                'pass_token': solution.get('pass_token') or solution.get('passToken'),
+                'gen_time': str(solution.get('gen_time') or solution.get('genTime') or ''),
+            }
+            if result['lot_number'] and result['captcha_output'] and result['pass_token']:
+                return result
+            raise RuntimeError(f"{provider_name} 返回结果不完整: {solution}")
+
+        if status in ('failed', 'error'):
+            raise RuntimeError(f"{provider_name} 打码失败: {data}")
+
+        # processing / idle
+    raise TimeoutError(f"{provider_name} 打码超时（>{max_wait}s）")
+
+
+def solve_geetest_v4(website_url, captcha_id):
+    """调用打码平台解决 Geetest V4，返回 captcha_result 字段"""
+    api_key, provider = get_captcha_config()
+    if not api_key:
+        print_with_time(
+            "登录页需要 Geetest 点击验证，但未配置打码 API Key。"
+            "请设置 Secrets: CAPSOLVER_API_KEY 或 YESCAPTCHA_API_KEY",
+            "ERROR",
+        )
+        return None
+    if not captcha_id:
+        print_with_time("未能从登录页解析 captchaId", "ERROR")
+        return None
+
+    session = create_session()
+    session.headers.update({'Content-Type': 'application/json', 'Accept': 'application/json'})
+    try:
+        if provider == 'yescaptcha':
+            create_url = 'https://api.yescaptcha.com/createTask'
+            result_url = 'https://api.yescaptcha.com/getTaskResult'
+            task = {
+                'type': 'GeeTestTaskProxyless',
+                'websiteURL': website_url,
+                'gt': captcha_id,
+                'version': 4,
+                'initParameters': {'captcha_id': captcha_id},
+            }
+            provider_name = 'YesCaptcha'
+        else:
+            # 默认 CapSolver
+            create_url = 'https://api.capsolver.com/createTask'
+            result_url = 'https://api.capsolver.com/getTaskResult'
+            task = {
+                'type': 'GeeTestTaskProxyLess',
+                'websiteURL': website_url,
+                'captchaId': captcha_id,
+            }
+            provider_name = 'CapSolver'
+
+        print_with_time(f"正在通过 {provider_name} 解决 Geetest V4 验证码...", "INFO")
+        create_payload = {'clientKey': api_key, 'task': task}
+        resp = session.post(create_url, json=create_payload, timeout=30, verify=False)
+        data = resp.json()
+        error_id = data.get('errorId', 0)
+        if error_id not in (0, '0', None, ''):
+            msg = data.get('errorDescription') or data.get('errorCode') or str(data)
+            print_with_time(f"{provider_name} 创建任务失败: {msg}", "ERROR")
+            return None
+
+        task_id = data.get('taskId')
+        if not task_id and data.get('status') in ('ready', 'success') and data.get('solution'):
+            solution = data['solution']
+            result = {
+                'lot_number': solution.get('lot_number') or solution.get('lotNumber'),
+                'captcha_output': solution.get('captcha_output') or solution.get('captchaOutput'),
+                'pass_token': solution.get('pass_token') or solution.get('passToken'),
+                'gen_time': str(solution.get('gen_time') or solution.get('genTime') or ''),
+            }
+            print_with_time("验证码解决成功", "SUCCESS")
+            return result
+
+        if not task_id:
+            print_with_time(f"{provider_name} 未返回 taskId: {data}", "ERROR")
+            return None
+
+        result = _poll_task_result(
+            session,
+            result_url,
+            {'clientKey': api_key, 'taskId': task_id},
+            provider_name,
+        )
+        print_with_time("验证码解决成功", "SUCCESS")
+        return result
+    except Exception as e:
+        print_with_time(f"解决验证码失败: {e}", "ERROR")
+        return None
+    finally:
+        session.close()
+
+
+def build_login_form_data(email, password, captcha_result=None, page_loaded_at=None):
+    """构造与前端一致的登录表单数据（含 captcha_result 嵌套字段）"""
+    if page_loaded_at is None:
+        page_loaded_at = int(time.time() * 1000)
+
+    form = [
+        ('host', BASE_DOMAIN),
+        ('email', email),
+        ('passwd', password),
+        ('code', ''),
+        ('twofa_step', '0'),
+        ('remember_me', 'on'),
+        ('pageLoadedAt', str(page_loaded_at)),
+    ]
+    if captcha_result:
+        form.extend([
+            ('captcha_result[lot_number]', captcha_result.get('lot_number', '')),
+            ('captcha_result[captcha_output]', captcha_result.get('captcha_output', '')),
+            ('captcha_result[pass_token]', captcha_result.get('pass_token', '')),
+            ('captcha_result[gen_time]', str(captcha_result.get('gen_time', ''))),
+        ])
+    return form
+
+
 def login_and_get_cookie():
-    """登录 SSPanel 并获取 Cookie"""
+    """登录 SSPanel 并获取 Cookie（支持 Geetest V4 点击验证）"""
     email = os.getenv('IKUUU_EMAIL') or LOCAL_EMAIL
     password = os.getenv('IKUUU_PASSWORD') or LOCAL_PASSWORD
 
@@ -317,10 +516,10 @@ def login_and_get_cookie():
 
     session = create_session()
     try:
-        # 获取登录页面（取CSRF token）
         login_page_url = f"{BASE_URL}/auth/login"
+        page_loaded_at = int(time.time() * 1000)
         try:
-            response = session.get(login_page_url, timeout=8, verify=False)
+            response = session.get(login_page_url, timeout=15, verify=False)
         except Exception as e:
             print_with_time(f"获取登录页面失败: {str(e)}", "ERROR")
             return None
@@ -329,32 +528,51 @@ def login_and_get_cookie():
             print_with_time(f"无法访问登录页面，状态码: {response.status_code}", "ERROR")
             return None
 
-        # 查找 CSRF token
-        soup = BeautifulSoup(response.text, 'html.parser')
+        page_html = response.text
+        decoded_html = decode_page_html(page_html)
+
+        # CSRF token（部分主题仍可能使用）
+        soup = BeautifulSoup(decoded_html, 'html.parser')
         csrf_input = soup.find('input', {'name': '_token'})
 
-        login_data = {'email': email, 'passwd': password}
-        if csrf_input:
-            login_data['_token'] = csrf_input.get('value')
+        captcha_id = extract_geetest_captcha_id(page_html)
+        captcha_result = None
+        if captcha_id:
+            print_with_time(f"检测到 Geetest V4 验证码 (captchaId={captcha_id[:8]}...)", "INFO")
+            captcha_result = solve_geetest_v4(login_page_url, captcha_id)
+            if not captcha_result:
+                return None
+        else:
+            print_with_time("未检测到 Geetest 验证码，尝试直接登录", "WARNING")
 
-        # 发送登录请求
+        login_data = build_login_form_data(email, password, captcha_result, page_loaded_at)
+        if csrf_input and csrf_input.get('value'):
+            login_data.append(('_token', csrf_input.get('value')))
+
         print_with_time("正在登录...", "INFO")
         headers = {
             'Origin': BASE_URL,
             'Referer': login_page_url,
-            'Content-Type': 'application/x-www-form-urlencoded'
+            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            'X-Requested-With': 'XMLHttpRequest',
+            'Accept': 'application/json, text/javascript, */*; q=0.01',
         }
 
         try:
-            response = session.post(login_page_url, data=login_data, headers=headers,
-                                    timeout=8, verify=False, allow_redirects=False)
+            response = session.post(
+                login_page_url,
+                data=login_data,
+                headers=headers,
+                timeout=20,
+                verify=False,
+                allow_redirects=False,
+            )
         except Exception as e:
             print_with_time(f"登录请求失败: {str(e)}", "ERROR")
             return None
 
         cookie_string = '; '.join([f"{c.name}={c.value}" for c in session.cookies])
 
-        # 检查登录结果
         if response.status_code == 302 and '/user' in response.headers.get('Location', ''):
             print_with_time("登录成功", "SUCCESS")
             return cookie_string or None
@@ -365,12 +583,14 @@ def login_and_get_cookie():
                 if result.get('ret') == 1:
                     print_with_time("登录成功", "SUCCESS")
                     return cookie_string or None
-                else:
-                    print_with_time(f"登录失败: {result.get('msg', '未知错误')}", "ERROR")
-                    return None
+                msg = result.get('msg', '未知错误')
+                print_with_time(f"登录失败: {msg}", "ERROR")
+                # 标记验证码类错误，避免无谓切换域名
+                if any(k in str(msg) for k in ['验证', 'captcha', 'Captcha', 'geetest', 'GeeTest']):
+                    return 'CAPTCHA_ERROR'
+                return None
             except Exception:
-                # JSON解析失败，用Cookie判断
-                if cookie_string:
+                if cookie_string and any(k in cookie_string for k in ['uid', 'email', 'key']):
                     print_with_time("登录成功（Cookie检测）", "SUCCESS")
                     return cookie_string
 
@@ -383,6 +603,8 @@ def login_and_get_cookie():
         return None
     finally:
         session.close()
+
+
 
 def checkin(cookie):
     """执行签到操作"""
@@ -532,8 +754,15 @@ def main():
 
     # 登录
     cookie_data = login_and_get_cookie()
+    if cookie_data == 'CAPTCHA_ERROR':
+        print_with_time(
+            "验证码校验失败。请确认 CAPSOLVER_API_KEY/YESCAPTCHA_API_KEY 有效且账户有余额",
+            "ERROR",
+        )
+        return False
+
     if not cookie_data:
-        # 登录失败，尝试其他域名
+        # 登录失败，尝试其他域名（排除验证码问题）
         print_with_time("登录失败，尝试切换域名...", "WARNING")
         original = BASE_DOMAIN
         for domain in discover_domains():
@@ -542,6 +771,12 @@ def main():
                 save_domain_to_file(domain)
                 print_with_time(f"切换到 {domain}，重试登录...", "INFO")
                 cookie_data = login_and_get_cookie()
+                if cookie_data == 'CAPTCHA_ERROR':
+                    print_with_time(
+                        "验证码校验失败。请确认 CAPSOLVER_API_KEY/YESCAPTCHA_API_KEY 有效且账户有余额",
+                        "ERROR",
+                    )
+                    return False
                 if cookie_data:
                     break
 

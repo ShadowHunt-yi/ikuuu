@@ -38,6 +38,10 @@ jobs:
         IKUUU_EMAIL: ${{ secrets.IKUUU_EMAIL }}
         IKUUU_PASSWORD: ${{ secrets.IKUUU_PASSWORD }}
         IKUUU_DOMAIN: ${{ secrets.IKUUU_DOMAIN }}  # 可选，不设置则自动发现域名
+        # Geetest V4 点击验证（二选一即可，推荐 CapSolver）
+        CAPSOLVER_API_KEY: ${{ secrets.CAPSOLVER_API_KEY }}
+        YESCAPTCHA_API_KEY: ${{ secrets.YESCAPTCHA_API_KEY }}
+        CAPTCHA_PROVIDER: ${{ secrets.CAPTCHA_PROVIDER }}  # 可选: capsolver / yescaptcha
       run: |
         echo "🚀 开始执行 IKUUU 自动签到..."
         python main.py
