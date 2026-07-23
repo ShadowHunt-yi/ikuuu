@@ -52,9 +52,14 @@ DOMAIN_TEST_TIMEOUT = 5
 # 本地测试变量，本地测试时可以在这里设置，环境变量优先级更高
 LOCAL_EMAIL = ""     # 本地测试时填入邮箱
 LOCAL_PASSWORD = ""  # 本地测试时填入密码
-LOCAL_COOKIE = ""    # 免费方案：浏览器登录后的 Cookie（可跳过验证码）
-LOCAL_CAPTCHA_API_KEY = ""  # 本地测试时填入打码平台 API Key（CapSolver / YesCaptcha）
+LOCAL_COOKIE = ""    # 可选：浏览器 Cookie（备用方案）
+LOCAL_CAPTCHA_API_KEY = ""  # 可选：打码平台 API Key（浏览器路径失败时的备用）
 LOCAL_CAPTCHA_PROVIDER = ""  # 可选: capsolver / yescaptcha，留空则自动识别
+# 是否优先使用免费 Playwright 过 Geetest（默认开启，设 0/false 关闭）
+LOCAL_USE_BROWSER_LOGIN = True
+
+# 账号密码登录时，验证码/网络失败的最大重试次数
+LOGIN_MAX_RETRIES = 3
 
 def print_with_time(message, level="INFO"):
     """带时间戳和级别的打印"""
@@ -387,21 +392,67 @@ def validate_cookie_session(cookie):
     return False
 
 
+def get_account_credentials():
+    """读取邮箱/密码配置"""
+    email = (os.getenv('IKUUU_EMAIL') or LOCAL_EMAIL or '').strip()
+    password = (os.getenv('IKUUU_PASSWORD') or LOCAL_PASSWORD or '').strip()
+    return email, password
+
+
+def use_browser_login_enabled():
+    """是否启用免费 Playwright 过 Geetest（默认 True）"""
+    env = os.getenv('IKUUU_USE_BROWSER_LOGIN')
+    if env is not None and str(env).strip() != '':
+        return str(env).strip().lower() in ('1', 'true', 'yes', 'on')
+    return bool(LOCAL_USE_BROWSER_LOGIN)
+
+
+def try_login_with_browser():
+    """免费主路径：Playwright 点击 Geetest「点我开始验证」后登录拿 Cookie"""
+    email, password = get_account_credentials()
+    if not email or not password:
+        return None
+    if not use_browser_login_enabled():
+        print_with_time("已关闭浏览器登录（IKUUU_USE_BROWSER_LOGIN=0）", "DEBUG")
+        return None
+
+    try:
+        from browser_login import login_with_browser
+    except ImportError as e:
+        print_with_time(f"无法导入 browser_login: {e}", "WARNING")
+        return None
+
+    if '@' in email:
+        masked = f"{email[:3]}***{email.split('@')[1]}"
+    else:
+        masked = f"{email[:3]}***"
+    print_with_time(f"账号: {masked}，域名: {BASE_DOMAIN}（免费浏览器过验证码）", "INFO")
+
+    cookie = login_with_browser(email, password, BASE_URL)
+    if cookie and validate_cookie_session(cookie):
+        return cookie
+    if cookie:
+        # Reason: 刚登录的 Cookie 偶发校验页特征不明显，仍可直接用于签到
+        print_with_time("Cookie 校验页面特征不明确，仍尝试使用浏览器登录结果", "WARNING")
+        return cookie
+    return None
+
+
 def try_login_with_cookie():
-    """免费方案：使用已有 Cookie 跳过登录验证码"""
+    """可选备用：使用已有 Cookie 跳过登录验证码（无账号密码或登录失败时）"""
     cookie = normalize_cookie_string(get_cookie_from_config())
     if not cookie:
         return None
 
-    print_with_time("检测到 IKUUU_COOKIE，尝试免验证码登录...", "INFO")
+    print_with_time("检测到 IKUUU_COOKIE，尝试 Cookie 登录...", "INFO")
     if not cookie_looks_valid(cookie):
         print_with_time("Cookie 缺少常见登录字段（uid/email/key），仍继续校验", "WARNING")
 
     if validate_cookie_session(cookie):
-        print_with_time("Cookie 有效，已跳过账号密码登录", "SUCCESS")
+        print_with_time("Cookie 有效，登录成功", "SUCCESS")
         return cookie
 
-    print_with_time("Cookie 无效或已过期，将回退到账号密码登录", "WARNING")
+    print_with_time("Cookie 无效或已过期", "WARNING")
     return None
 
 
@@ -602,18 +653,8 @@ def build_login_form_data(email, password, captcha_result=None, page_loaded_at=N
     return form
 
 
-def login_and_get_cookie():
-    """登录 SSPanel 并获取 Cookie（支持 Geetest V4 点击验证）"""
-    email = os.getenv('IKUUU_EMAIL') or LOCAL_EMAIL
-    password = os.getenv('IKUUU_PASSWORD') or LOCAL_PASSWORD
-
-    if not email or not password:
-        print_with_time("请设置账户信息（环境变量 IKUUU_EMAIL/IKUUU_PASSWORD 或代码中 LOCAL_EMAIL/LOCAL_PASSWORD）", "ERROR")
-        return None
-
-    masked_email = f"{email[:3]}***{email.split('@')[1]}"
-    print_with_time(f"账号: {masked_email}，域名: {BASE_DOMAIN}", "INFO")
-
+def _do_login_once(email, password):
+    """单次账号密码登录（含 Geetest V4）。成功返回 cookie 字符串，失败返回 None 或 'CAPTCHA_ERROR'。"""
     session = create_session()
     try:
         login_page_url = f"{BASE_URL}/auth/login"
@@ -641,7 +682,7 @@ def login_and_get_cookie():
             print_with_time(f"检测到 Geetest V4 验证码 (captchaId={captcha_id[:8]}...)", "INFO")
             captcha_result = solve_geetest_v4(login_page_url, captcha_id)
             if not captcha_result:
-                return None
+                return 'CAPTCHA_ERROR'
         else:
             print_with_time("未检测到 Geetest 验证码，尝试直接登录", "WARNING")
 
@@ -685,7 +726,7 @@ def login_and_get_cookie():
                     return cookie_string or None
                 msg = result.get('msg', '未知错误')
                 print_with_time(f"登录失败: {msg}", "ERROR")
-                # 标记验证码类错误，避免无谓切换域名
+                # Reason: 验证码类错误单独标记，便于重试时重新打码而不是立刻换域名
                 if any(k in str(msg) for k in ['验证', 'captcha', 'Captcha', 'geetest', 'GeeTest']):
                     return 'CAPTCHA_ERROR'
                 return None
@@ -703,6 +744,61 @@ def login_and_get_cookie():
         return None
     finally:
         session.close()
+
+
+def login_and_get_cookie(max_retries=None):
+    """账号密码登录并获取 Cookie（可选打码平台过 Geetest V4，失败自动重试）"""
+    if max_retries is None:
+        max_retries = LOGIN_MAX_RETRIES
+
+    email, password = get_account_credentials()
+    if not email or not password:
+        print_with_time(
+            "请设置账户信息（环境变量 IKUUU_EMAIL/IKUUU_PASSWORD 或代码中 LOCAL_EMAIL/LOCAL_PASSWORD）",
+            "ERROR",
+        )
+        return None
+
+    api_key, _ = get_captcha_config()
+    if not api_key:
+        print_with_time(
+            "未配置打码 API Key，跳过打码登录路径",
+            "DEBUG",
+        )
+        return 'CAPTCHA_ERROR'
+
+    # Reason: 邮箱可能不含 @（异常配置），mask 时兜底避免崩溃
+    if '@' in email:
+        masked_email = f"{email[:3]}***{email.split('@')[1]}"
+    else:
+        masked_email = f"{email[:3]}***"
+    print_with_time(f"账号: {masked_email}，域名: {BASE_DOMAIN}（打码平台）", "INFO")
+
+    last_result = None
+    for attempt in range(1, max_retries + 1):
+        if attempt > 1:
+            wait = attempt * 2
+            print_with_time(f"第 {attempt}/{max_retries} 次重试登录（等待 {wait}s）...", "WARNING")
+            time.sleep(wait)
+        else:
+            print_with_time(f"开始打码登录（最多 {max_retries} 次）...", "INFO")
+
+        result = _do_login_once(email, password)
+        last_result = result
+
+        # 成功拿到 cookie 字符串
+        if result and result != 'CAPTCHA_ERROR':
+            return result
+
+        # 账号密码错误等非验证码失败：不必重试
+        if result is None:
+            print_with_time("登录失败且非验证码问题，停止重试", "WARNING")
+            return None
+
+        # CAPTCHA_ERROR：继续重试（重新拉页 + 重新打码）
+        print_with_time(f"验证码校验失败（第 {attempt}/{max_retries} 次）", "WARNING")
+
+    return last_result
 
 
 
@@ -840,7 +936,7 @@ def get_user_info(cookie):
         return False
 
 def main():
-    """主程序入口"""
+    """主程序入口：账号密码 + 免费浏览器过 Geetest → 签到（打码/Cookie 为备用）"""
     print_separator("=", 60)
     print_with_time("自动签到程序启动", "INFO")
     print_separator("=", 60)
@@ -851,22 +947,62 @@ def main():
     resolve_domain()
 
     start_time = time.time()
+    email, password = get_account_credentials()
+    has_credentials = bool(email and password)
+    has_cookie = bool(get_cookie_from_config())
+    api_key, provider = get_captcha_config()
+    browser_on = use_browser_login_enabled()
 
-    # 优先使用 Cookie（免费跳过 Geetest）
-    cookie_data = try_login_with_cookie()
+    cookie_data = None
 
-    # 登录（账号密码 + 可选打码）
-    if not cookie_data:
-        cookie_data = login_and_get_cookie()
-    if cookie_data == 'CAPTCHA_ERROR':
+    # Reason: 优先免费浏览器点击 Geetest；打码平台与手工 Cookie 仅作备用
+    if has_credentials:
+        if browser_on:
+            print_with_time("优先使用免费浏览器路径登录（无需打码平台）", "INFO")
+            cookie_data = try_login_with_browser()
+
+        if not cookie_data and api_key:
+            print_with_time(
+                f"浏览器登录不可用，回退打码平台: {provider or 'capsolver'}",
+                "WARNING",
+            )
+            cookie_data = login_and_get_cookie()
+
+        if not cookie_data and has_cookie:
+            print_with_time("回退使用 IKUUU_COOKIE...", "INFO")
+            cookie_data = try_login_with_cookie()
+
+        if not cookie_data or cookie_data == 'CAPTCHA_ERROR':
+            print_with_time(
+                "登录失败。请确认：1) 已安装 playwright 浏览器  2) 账号密码正确  "
+                "3) 可选配置 CAPSOLVER_API_KEY / IKUUU_COOKIE 作备用",
+                "ERROR",
+            )
+            return False
+    elif has_cookie:
+        print_with_time("未配置账号密码，使用 Cookie 登录", "INFO")
+        cookie_data = try_login_with_cookie()
+    else:
         print_with_time(
-            "验证码校验失败。请确认 CAPSOLVER_API_KEY/YESCAPTCHA_API_KEY 有效且账户有余额",
+            "请配置 IKUUU_EMAIL + IKUUU_PASSWORD（推荐，免费浏览器过验证码），"
+            "或配置 IKUUU_COOKIE",
             "ERROR",
         )
         return False
 
+    if cookie_data == 'CAPTCHA_ERROR':
+        if has_cookie and has_credentials:
+            print_with_time("打码登录失败，尝试备用 Cookie...", "WARNING")
+            cookie_data = try_login_with_cookie()
+        if cookie_data == 'CAPTCHA_ERROR' or not cookie_data:
+            print_with_time(
+                "验证码校验失败。可改用免费浏览器路径（默认），或配置有效的打码 Key",
+                "ERROR",
+            )
+            return False
+
     if not cookie_data:
-        # 登录失败，尝试其他域名（排除验证码问题）
+        # 登录失败，尝试其他域名
         print_with_time("登录失败，尝试切换域名...", "WARNING")
         original = BASE_DOMAIN
         for domain in discover_domains():
@@ -874,17 +1010,18 @@ def main():
                 _set_domain(domain)
                 save_domain_to_file(domain)
                 print_with_time(f"切换到 {domain}，重试登录...", "INFO")
-                cookie_data = login_and_get_cookie()
-                if cookie_data == 'CAPTCHA_ERROR':
-                    print_with_time(
-                        "验证码校验失败。请确认 CAPSOLVER_API_KEY/YESCAPTCHA_API_KEY 有效且账户有余额",
-                        "ERROR",
-                    )
-                    return False
-                if cookie_data:
+                if has_credentials and browser_on:
+                    cookie_data = try_login_with_browser()
+                if not cookie_data and has_credentials and api_key:
+                    cookie_data = login_and_get_cookie()
+                if not cookie_data and has_cookie:
+                    cookie_data = try_login_with_cookie()
+                if cookie_data and cookie_data != 'CAPTCHA_ERROR':
                     break
+                if cookie_data == 'CAPTCHA_ERROR':
+                    cookie_data = None
 
-    if not cookie_data:
+    if not cookie_data or cookie_data == 'CAPTCHA_ERROR':
         print_with_time("所有域名均无法登录", "ERROR")
         return False
 

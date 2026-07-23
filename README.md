@@ -4,30 +4,49 @@
 
 ## 功能特性
 
-- 自动登录 IKUUU 账户并执行每日签到
+- **免费过 Geetest**：Playwright 无头浏览器点击「点我开始验证」，账号密码即可签到
 - 显示账户信息（流量、会员状态等）
-- **域名自动发现**：从导航页自动解析最新可用域名，无需手动更换
-- **域名缓存**：可用域名保存到 `domain.txt`，避免每次重新发现
-- **GitHub Actions 自动提交**：域名变更后自动提交到仓库，下次运行直接使用
-- 支持 GitHub Actions 定时运行
+- **域名自动发现**：从导航页自动解析最新可用域名
+- **域名缓存**：可用域名保存到 `domain.txt`
+- **GitHub Actions**：定时运行，域名变更后自动提交
+
+## 技术方案
+
+登录页使用 **Geetest V4**（`captcha_type=ai` 自适应一键验证）。服务端会校验 `captcha_result`，空 token / 伪造 token 无法登录。
+
+本项目采用的路径：
+
+```
+1. 解析可用域名
+2. Playwright 打开登录页
+3. 点击 Geetest「点我开始验证」→ 拿到合法 captcha_result
+4. 提交邮箱 + 密码登录 → 获取会话 Cookie
+5. POST /user/checkin 签到，并拉取账户信息
+```
+
+> 真实浏览器点击雷达按钮后，Geetest 通常直接 `verify success`，因此默认不依赖第三方打码服务。  
+> 代码中仍保留「打码 API / 手工 Cookie」作为可选实现分支（浏览器环境不可用时的技术兜底），日常使用只需邮箱和密码。
 
 ## 安装依赖
 
 ```bash
 pip install -r requirements.txt
-```
-
-或手动安装：
-
-```bash
-pip install requests beautifulsoup4 brotli urllib3
+# 首次需要浏览器内核（任选其一）
+playwright install chromium
+# 或使用本机已安装的 Chrome / Edge（代码会自动尝试 channel=chrome/msedge）
 ```
 
 ## 配置说明
 
-### 配置优先级
-
 **环境变量 > 本地变量 > 默认值**
+
+| 配置项 | 说明 | 必需 |
+|--------|------|------|
+| `IKUUU_EMAIL` | 邮箱 | ✅ |
+| `IKUUU_PASSWORD` | 密码 | ✅ |
+| `IKUUU_DOMAIN` | 自定义域名 | 否（自动发现） |
+| `IKUUU_USE_BROWSER_LOGIN` | `1`/`0`，默认开启浏览器过验证码 | 否 |
+| `IKUUU_COOKIE` | 已有会话 Cookie | 否（兜底） |
 
 ### 本地运行
 
@@ -37,120 +56,78 @@ pip install requests beautifulsoup4 brotli urllib3
 LOCAL_EMAIL = "your_email@example.com"
 LOCAL_PASSWORD = "your_password"
 LOCAL_DOMAIN = ""  # 可选，留空则自动发现
+LOCAL_USE_BROWSER_LOGIN = True
 ```
 
 或使用环境变量：
 
 ```bash
-# Linux/macOS
 export IKUUU_EMAIL="your_email@example.com"
 export IKUUU_PASSWORD="your_password"
-
-# Windows PowerShell
-$env:IKUUU_EMAIL = "your_email@example.com"
-$env:IKUUU_PASSWORD = "your_password"
-```
-
-然后运行：
-
-```bash
 python main.py
 ```
 
 ## 域名自动发现
 
-IKUUU 经常更换域名，本程序实现了自动发现机制：
-
-### 工作流程
-
-1. 读取 `domain.txt` 缓存的域名，测试是否可用
+1. 读取 `domain.txt` 缓存并测试
 2. 不可用则依次测试环境变量、本地变量、默认域名
-3. 全部失败则访问导航页（如 `ikuuu.ch`），自动解析最新域名
-4. 找到可用域名后保存到 `domain.txt`
+3. 全部失败则访问导航页自动解析最新域名
+4. 找到可用域名后写入 `domain.txt`
 
-### 域名判定规则
+判定规则：
 
-- **真实服务**：GET 根路径返回 302 跳转到 `/auth/login`
-- **导航页**：GET 根路径返回 200（HTML页面）
-
-### 导航页解析策略
-
-导航页的域名信息嵌入在混淆的 JavaScript 中，程序使用多种策略提取：
-
-1. HTML 标签解析（`<h3>`、`<a>` 标签）
-2. JS 字符串拼接模式匹配（如 `'ikuuu'+'.nl'`）
-3. 混淆 JS 字符串数组解码（自定义 base64 字母表）
+- **真实服务**：GET `/` → 302 → `/auth/login`
+- **导航页**：GET `/` → 200
 
 ## GitHub Actions 配置
 
-### 设置步骤
-
 1. **Fork 此仓库**
-
-2. **配置 Secrets**：`Settings` -> `Secrets and variables` -> `Actions`
+2. **配置 Secrets**（`Settings` → `Secrets and variables` → `Actions`）
 
    | Secret 名称 | 说明 | 必需 |
    |------------|------|------|
-   | `IKUUU_EMAIL` | 邮箱 | 账号登录时需要 |
-   | `IKUUU_PASSWORD` | 密码 | 账号登录时需要 |
-   | `IKUUU_COOKIE` | 浏览器登录 Cookie（**免费跳过验证码**） | 推荐 |
-   | `CAPSOLVER_API_KEY` | CapSolver 打码 Key | Cookie 失效时备用 |
-   | `YESCAPTCHA_API_KEY` | YesCaptcha 打码 Key | Cookie 失效时备用 |
-   | `CAPTCHA_PROVIDER` | `capsolver` 或 `yescaptcha` | 否 |
-   | `IKUUU_DOMAIN` | 自定义域名 | 否（自动发现） |
-
-   > 登录页启用了 **Geetest V4 点击验证**。  
-   > **免费优先**：配置 `IKUUU_COOKIE` 即可签到，无需打码平台。  
-   > Cookie 过期后：重新从浏览器复制更新，或改用打码 Key 自动登录。
+   | `IKUUU_EMAIL` | 邮箱 | ✅ |
+   | `IKUUU_PASSWORD` | 密码 | ✅ |
+   | `IKUUU_DOMAIN` | 自定义域名 | 否 |
+   | `IKUUU_COOKIE` | 会话 Cookie | 否 |
 
 3. **启用 Actions** 并手动触发一次测试
 
 ### 运行时间
 
-- **自动运行**：每天北京时间 9:00（UTC 1:00）
-- **手动触发**：Actions 页面随时可运行
+- 自动：每天北京时间 9:00（UTC 1:00）
+- 手动：Actions 页面可随时运行
 
-### 域名缓存自动提交
-
-签到成功后，如果 `domain.txt` 有变化，GitHub Actions 会自动提交更新，下次运行直接使用缓存的域名。
-
-### 修改运行时间
-
-编辑 `.github/workflows/ikuuu-checkin.yml`：
-
-```yaml
-schedule:
-  - cron: '0 1 * * *'  # UTC 1:00 = 北京时间 9:00
-```
+Workflow 会自动执行 `playwright install --with-deps chromium`。
 
 ## 常见问题
 
 ### 登录失败
 
-- 检查邮箱密码是否正确
-- 若报错 **「系统无法接受您的验证结果」**：登录页启用了 Geetest 点击验证
-  - **免费**：浏览器登录后配置 `IKUUU_COOKIE`（推荐）
-  - **付费自动登录**：配置 `CAPSOLVER_API_KEY` 或 `YESCAPTCHA_API_KEY`
-- 域名可能已更换，程序会自动尝试发现新域名
-- 如果自动发现也失败，可手动设置 `IKUUU_DOMAIN`
+- 确认邮箱密码正确
+- 确认已安装浏览器：`playwright install chromium`，或系统装有 Chrome/Edge
+- 域名可能已更换，程序会自动发现；也可手动设置 `IKUUU_DOMAIN`
+- 无浏览器环境时，可改用有效的 `IKUUU_COOKIE` 兜底
 
-### GitHub Actions 运行失败
+### GitHub Actions 失败
 
-- 确认已正确添加 Secrets（无多余空格）
-- 查看 Actions 运行日志定位问题
+- 确认 Secrets 无多余空格
+- 查看日志中 Playwright / Chromium 是否安装成功
 - 网络问题可稍后手动重试
 
-### 缺少 brotli 库
+### 缺少依赖
 
 ```bash
-pip install brotli
+pip install -r requirements.txt
+playwright install chromium
 ```
 
 ## 注意事项
 
-1. 请妥善保管账户信息，不要提交密码到公开仓库
+1. 请妥善保管账户信息，不要把密码提交到公开仓库
 2. 建议每天运行一次，避免频繁请求
-3. 域名更换无需手动干预，程序会自动发现并更新
+3. 域名更换无需手动干预
+4. 浏览器自动化依赖 Playwright；CI 已配置自动安装 Chromium
 
 ## 许可证
 
