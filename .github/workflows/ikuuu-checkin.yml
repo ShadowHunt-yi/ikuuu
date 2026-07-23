@@ -12,38 +12,41 @@ permissions:
 jobs:
   checkin:
     runs-on: ubuntu-latest
-    
+
     steps:
     - name: 检出代码
       uses: actions/checkout@v4
-      
+
     - name: 设置 Python 环境
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
         cache: 'pip'  # 缓存 pip 依赖
-        
+
     - name: 安装依赖
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
-        
+        # Reason: 免费浏览器过 Geetest，需要 Chromium
+        python -m playwright install --with-deps chromium
+
     - name: 验证依赖安装
       run: |
         echo "📦 已安装的包版本："
-        pip list | grep -E "requests|beautifulsoup4|brotli|urllib3"
-        
+        pip list | grep -E "requests|beautifulsoup4|brotli|urllib3|playwright"
+
     - name: 执行签到
       env:
+        # 推荐：仅邮箱+密码，Playwright 免费点击 Geetest，无需打码
         IKUUU_EMAIL: ${{ secrets.IKUUU_EMAIL }}
         IKUUU_PASSWORD: ${{ secrets.IKUUU_PASSWORD }}
-        IKUUU_DOMAIN: ${{ secrets.IKUUU_DOMAIN }}  # 可选，不设置则自动发现域名
-        # 免费方案：浏览器登录后的 Cookie（可跳过验证码）
-        IKUUU_COOKIE: ${{ secrets.IKUUU_COOKIE }}
-        # Geetest V4 点击验证（二选一即可；配置了有效 Cookie 时可不填）
+        # 可选备用：打码平台 / 手工 Cookie / 强制域名
         CAPSOLVER_API_KEY: ${{ secrets.CAPSOLVER_API_KEY }}
         YESCAPTCHA_API_KEY: ${{ secrets.YESCAPTCHA_API_KEY }}
-        CAPTCHA_PROVIDER: ${{ secrets.CAPTCHA_PROVIDER }}  # 可选: capsolver / yescaptcha
+        CAPTCHA_PROVIDER: ${{ secrets.CAPTCHA_PROVIDER }}
+        IKUUU_DOMAIN: ${{ secrets.IKUUU_DOMAIN }}
+        IKUUU_COOKIE: ${{ secrets.IKUUU_COOKIE }}
+        IKUUU_USE_BROWSER_LOGIN: ${{ secrets.IKUUU_USE_BROWSER_LOGIN }}
       run: |
         echo "🚀 开始执行 IKUUU 自动签到..."
         python main.py
