@@ -52,6 +52,7 @@ DOMAIN_TEST_TIMEOUT = 5
 # 本地测试变量，本地测试时可以在这里设置，环境变量优先级更高
 LOCAL_EMAIL = ""     # 本地测试时填入邮箱
 LOCAL_PASSWORD = ""  # 本地测试时填入密码
+LOCAL_COOKIE = ""    # 免费方案：浏览器登录后的 Cookie（可跳过验证码）
 LOCAL_CAPTCHA_API_KEY = ""  # 本地测试时填入打码平台 API Key（CapSolver / YesCaptcha）
 LOCAL_CAPTCHA_PROVIDER = ""  # 可选: capsolver / yescaptcha，留空则自动识别
 
@@ -304,6 +305,105 @@ def safe_request(method, url, **kwargs):
             if attempt == 1:
                 print_with_time(f"请求失败: {str(e)}", "ERROR")
     return None
+
+def get_cookie_from_config():
+    """读取 Cookie 配置（免费跳过验证码）"""
+    cookie = (os.getenv('IKUUU_COOKIE') or LOCAL_COOKIE or '').strip()
+    # 允许用户粘贴 document.cookie 或完整 Cookie 头
+    cookie = cookie.replace('\n', ' ').strip()
+    if cookie.lower().startswith('cookie:'):
+        cookie = cookie[7:].strip()
+    return cookie
+
+
+def normalize_cookie_string(cookie):
+    """规范化 Cookie 字符串"""
+    if not cookie:
+        return ''
+    # 去掉多余空格，保留 name=value; name2=value2
+    parts = []
+    for item in cookie.split(';'):
+        item = item.strip()
+        if not item or '=' not in item:
+            continue
+        name, value = item.split('=', 1)
+        name, value = name.strip(), value.strip()
+        if name:
+            parts.append(f"{name}={value}")
+    return '; '.join(parts)
+
+
+def cookie_looks_valid(cookie):
+    """粗略判断 Cookie 是否包含登录会话字段"""
+    if not cookie:
+        return False
+    lower = cookie.lower()
+    # SSPanel 常见字段
+    return any(k in lower for k in ['uid=', 'email=', 'key=', 'ip=', 'expire_in='])
+
+
+def validate_cookie_session(cookie):
+    """请求 /user 验证 Cookie 是否仍有效"""
+    cookie = normalize_cookie_string(cookie)
+    if not cookie:
+        return False
+
+    headers = {
+        'Cookie': cookie,
+        'Referer': f"{BASE_URL}/user",
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    }
+    try:
+        response = safe_request('GET', f"{BASE_URL}/user", headers=headers)
+    except Exception as e:
+        print_with_time(f"Cookie 校验请求失败: {e}", "WARNING")
+        return False
+
+    if not response or response.status_code != 200:
+        print_with_time(f"Cookie 校验失败，状态码: {getattr(response, 'status_code', 'N/A')}", "WARNING")
+        return False
+
+    text = response.text or ''
+    decoded = decode_page_html(text)
+    # 登录页特征
+    if re.search(r'/auth/login|name=["\']email["\']|登录\s*&mdash;|id=["\']password["\']', decoded, re.I):
+        # 有些用户页也会包含脚本字符串，再看 title
+        title_match = re.search(r'<title>(.*?)</title>', decoded, re.I | re.S)
+        title = (title_match.group(1) if title_match else '').lower()
+        if 'login' in title or '登录' in title:
+            print_with_time("Cookie 已失效（跳转到登录页）", "WARNING")
+            return False
+
+    # 用户中心特征
+    if re.search(r'checkin|/user/logout|剩余流量|会员|wallet|ann', decoded, re.I):
+        return True
+
+    # Cookie 字段齐全但页面特征不明显时，仍尝试使用
+    if cookie_looks_valid(cookie) and len(decoded) > 500:
+        print_with_time("Cookie 页面特征不明确，仍尝试使用", "WARNING")
+        return True
+
+    print_with_time("Cookie 看起来无效", "WARNING")
+    return False
+
+
+def try_login_with_cookie():
+    """免费方案：使用已有 Cookie 跳过登录验证码"""
+    cookie = normalize_cookie_string(get_cookie_from_config())
+    if not cookie:
+        return None
+
+    print_with_time("检测到 IKUUU_COOKIE，尝试免验证码登录...", "INFO")
+    if not cookie_looks_valid(cookie):
+        print_with_time("Cookie 缺少常见登录字段（uid/email/key），仍继续校验", "WARNING")
+
+    if validate_cookie_session(cookie):
+        print_with_time("Cookie 有效，已跳过账号密码登录", "SUCCESS")
+        return cookie
+
+    print_with_time("Cookie 无效或已过期，将回退到账号密码登录", "WARNING")
+    return None
+
 
 def decode_page_html(html_text):
     """解码站点 base64 混淆页面（originBody）"""
@@ -752,8 +852,12 @@ def main():
 
     start_time = time.time()
 
-    # 登录
-    cookie_data = login_and_get_cookie()
+    # 优先使用 Cookie（免费跳过 Geetest）
+    cookie_data = try_login_with_cookie()
+
+    # 登录（账号密码 + 可选打码）
+    if not cookie_data:
+        cookie_data = login_and_get_cookie()
     if cookie_data == 'CAPTCHA_ERROR':
         print_with_time(
             "验证码校验失败。请确认 CAPSOLVER_API_KEY/YESCAPTCHA_API_KEY 有效且账户有余额",

@@ -91,14 +91,17 @@ IKUUU 经常更换域名，本程序实现了自动发现机制：
 
    | Secret 名称 | 说明 | 必需 |
    |------------|------|------|
-   | `IKUUU_EMAIL` | 邮箱 | 是 |
-   | `IKUUU_PASSWORD` | 密码 | 是 |
-   | `CAPSOLVER_API_KEY` | CapSolver 打码 Key（推荐） | 是* |
-   | `YESCAPTCHA_API_KEY` | YesCaptcha 打码 Key | 是* |
+   | `IKUUU_EMAIL` | 邮箱 | 账号登录时需要 |
+   | `IKUUU_PASSWORD` | 密码 | 账号登录时需要 |
+   | `IKUUU_COOKIE` | 浏览器登录 Cookie（**免费跳过验证码**） | 推荐 |
+   | `CAPSOLVER_API_KEY` | CapSolver 打码 Key | Cookie 失效时备用 |
+   | `YESCAPTCHA_API_KEY` | YesCaptcha 打码 Key | Cookie 失效时备用 |
    | `CAPTCHA_PROVIDER` | `capsolver` 或 `yescaptcha` | 否 |
    | `IKUUU_DOMAIN` | 自定义域名 | 否（自动发现） |
 
-   > *登录页已启用 **Geetest V4 点击验证**，`CAPSOLVER_API_KEY` 与 `YESCAPTCHA_API_KEY` 至少配置一个。
+   > 登录页启用了 **Geetest V4 点击验证**。  
+   > **免费优先**：配置 `IKUUU_COOKIE` 即可签到，无需打码平台。  
+   > Cookie 过期后：重新从浏览器复制更新，或改用打码 Key 自动登录。
 
 3. **启用 Actions** 并手动触发一次测试
 
@@ -125,9 +128,9 @@ schedule:
 ### 登录失败
 
 - 检查邮箱密码是否正确
-- 若报错 **「系统无法接受您的验证结果」**：登录页启用了 Geetest 点击验证，需要配置打码 API Key
-  - 推荐 [CapSolver](https://www.capsolver.com/)：在仓库 Secrets 添加 `CAPSOLVER_API_KEY`
-  - 或 [YesCaptcha](https://yescaptcha.com/)：添加 `YESCAPTCHA_API_KEY`
+- 若报错 **「系统无法接受您的验证结果」**：登录页启用了 Geetest 点击验证
+  - **免费**：浏览器登录后配置 `IKUUU_COOKIE`（推荐）
+  - **付费自动登录**：配置 `CAPSOLVER_API_KEY` 或 `YESCAPTCHA_API_KEY`
 - 域名可能已更换，程序会自动尝试发现新域名
 - 如果自动发现也失败，可手动设置 `IKUUU_DOMAIN`
 
