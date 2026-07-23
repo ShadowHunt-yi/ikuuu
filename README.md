@@ -4,30 +4,41 @@
 
 ## 功能特性
 
-- **免费过 Geetest**：用 Playwright 无头浏览器点击「点我开始验证」，**无需打码平台**
-- **账号密码一站式签到**：配置邮箱/密码即可登录并签到
+- **免费过 Geetest**：Playwright 无头浏览器点击「点我开始验证」，账号密码即可签到
 - 显示账户信息（流量、会员状态等）
 - **域名自动发现**：从导航页自动解析最新可用域名
 - **域名缓存**：可用域名保存到 `domain.txt`
-- **GitHub Actions 自动提交**：域名变更后自动提交
-- 打码平台 / Cookie 仅作可选备用
+- **GitHub Actions**：定时运行，域名变更后自动提交
+
+## 技术方案
+
+登录页使用 **Geetest V4**（`captcha_type=ai` 自适应一键验证）。服务端会校验 `captcha_result`，空 token / 伪造 token 无法登录。
+
+本项目采用的路径：
+
+```
+1. 解析可用域名
+2. Playwright 打开登录页
+3. 点击 Geetest「点我开始验证」→ 拿到合法 captcha_result
+4. 提交邮箱 + 密码登录 → 获取会话 Cookie
+5. POST /user/checkin 签到，并拉取账户信息
+```
+
+> 真实浏览器点击雷达按钮后，Geetest 通常直接 `verify success`，因此默认不依赖第三方打码服务。  
+> 代码中仍保留「打码 API / 手工 Cookie」作为可选实现分支（浏览器环境不可用时的技术兜底），日常使用只需邮箱和密码。
 
 ## 安装依赖
 
 ```bash
 pip install -r requirements.txt
-# 首次需要安装浏览器内核（任选其一）
+# 首次需要浏览器内核（任选其一）
 playwright install chromium
 # 或使用本机已安装的 Chrome / Edge（代码会自动尝试 channel=chrome/msedge）
 ```
 
 ## 配置说明
 
-### 配置优先级
-
 **环境变量 > 本地变量 > 默认值**
-
-### 推荐配置（免费，无需打码）
 
 | 配置项 | 说明 | 必需 |
 |--------|------|------|
@@ -35,8 +46,7 @@ playwright install chromium
 | `IKUUU_PASSWORD` | 密码 | ✅ |
 | `IKUUU_DOMAIN` | 自定义域名 | 否（自动发现） |
 | `IKUUU_USE_BROWSER_LOGIN` | `1`/`0`，默认开启浏览器过验证码 | 否 |
-| `CAPSOLVER_API_KEY` / `YESCAPTCHA_API_KEY` | 打码 Key | 否（浏览器失败时备用） |
-| `IKUUU_COOKIE` | 浏览器 Cookie | 否（备用） |
+| `IKUUU_COOKIE` | 已有会话 Cookie | 否（兜底） |
 
 ### 本地运行
 
@@ -56,18 +66,6 @@ export IKUUU_EMAIL="your_email@example.com"
 export IKUUU_PASSWORD="your_password"
 python main.py
 ```
-
-### 登录流程（免费浏览器优先）
-
-```
-1. 解析可用域名
-2. Playwright 打开登录页 → 点击 Geetest「点我开始验证」→ 提交账号密码 → 拿 Cookie
-3. （可选）浏览器失败时回退打码平台 / IKUUU_COOKIE
-4. POST /user/checkin 签到
-5. 拉取账户信息
-```
-
-> 站点 Geetest V4 当前为 `captcha_type=ai` 的自适应一键验证，真实浏览器点击雷达按钮后通常直接通过，因此可以完全不接打码平台。
 
 ## 域名自动发现
 
@@ -91,8 +89,7 @@ python main.py
    | `IKUUU_EMAIL` | 邮箱 | ✅ |
    | `IKUUU_PASSWORD` | 密码 | ✅ |
    | `IKUUU_DOMAIN` | 自定义域名 | 否 |
-   | `CAPSOLVER_API_KEY` / `YESCAPTCHA_API_KEY` | 打码备用 | 否 |
-   | `IKUUU_COOKIE` | Cookie 备用 | 否 |
+   | `IKUUU_COOKIE` | 会话 Cookie | 否 |
 
 3. **启用 Actions** 并手动触发一次测试
 
@@ -101,7 +98,7 @@ python main.py
 - 自动：每天北京时间 9:00（UTC 1:00）
 - 手动：Actions 页面可随时运行
 
-Workflow 会自动 `playwright install --with-deps chromium`。
+Workflow 会自动执行 `playwright install --with-deps chromium`。
 
 ## 常见问题
 
@@ -109,13 +106,13 @@ Workflow 会自动 `playwright install --with-deps chromium`。
 
 - 确认邮箱密码正确
 - 确认已安装浏览器：`playwright install chromium`，或系统装有 Chrome/Edge
-- 若在无图形/受限环境失败，可临时配置打码 Key 或 `IKUUU_COOKIE`
-- 域名可能已更换，程序会自动发现
+- 域名可能已更换，程序会自动发现；也可手动设置 `IKUUU_DOMAIN`
+- 无浏览器环境时，可改用有效的 `IKUUU_COOKIE` 兜底
 
 ### GitHub Actions 失败
 
 - 确认 Secrets 无多余空格
-- 查看日志中 Playwright 是否安装成功
+- 查看日志中 Playwright / Chromium 是否安装成功
 - 网络问题可稍后手动重试
 
 ### 缺少依赖
@@ -124,10 +121,6 @@ Workflow 会自动 `playwright install --with-deps chromium`。
 pip install -r requirements.txt
 playwright install chromium
 ```
-
-### 仍想用打码平台
-
-配置 `CAPSOLVER_API_KEY` 或 `YESCAPTCHA_API_KEY` 即可；仅在浏览器路径失败时回退使用。
 
 ## 注意事项
 
